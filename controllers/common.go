@@ -5,23 +5,23 @@ package controllers
 
 import (
 	"context"
-	"encoding/json"
 	e "errors"
 	"fmt"
 	"os"
 	"reflect"
 	"strings"
-	"time"
 
 	consolev1 "github.com/openshift/api/operator/v1"
 
-	"github.com/Masterminds/semver"
+	"github.com/Masterminds/semver/v3"
 	olmv1 "github.com/operator-framework/api/pkg/operators/v1"
 
 	configv1 "github.com/openshift/api/config/v1"
 	subv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	searchv2v1alpha1 "github.com/stolostron/search-v2-operator/api/v1alpha1"
 	apixv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
+
+	ocmapi "open-cluster-management.io/api/addon/v1alpha1"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -32,10 +32,11 @@ import (
 	utils "github.com/stolostron/multiclusterhub-operator/pkg/utils"
 
 	operatorv1 "github.com/stolostron/multiclusterhub-operator/api/v1"
-	"github.com/stolostron/multiclusterhub-operator/pkg/manifest"
 	"github.com/stolostron/multiclusterhub-operator/pkg/multiclusterengine"
 	"github.com/stolostron/multiclusterhub-operator/pkg/version"
 
+	// TODO: remove this when .spec.HubSize is back
+	mceutils "github.com/stolostron/backplane-operator/pkg/utils"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
@@ -45,88 +46,23 @@ import (
 
 // CacheSpec ...
 type CacheSpec struct {
-	IngressDomain    string
-	ImageOverrides   map[string]string
-	ImageRepository  string
-	ManifestVersion  string
-	ImageOverridesCM string
-}
-
-func (r *MultiClusterHubReconciler) ensureDeployment(m *operatorv1.MultiClusterHub, dep *appsv1.Deployment) (ctrl.Result, error) {
-	r.Log.Info("Reconciling MultiClusterHub")
-
-	if utils.ProxyEnvVarsAreSet() {
-		dep = addProxyEnvVarsToDeployment(dep)
-	}
-
-	// See if deployment already exists and create if it doesn't
-	found := &appsv1.Deployment{}
-	err := r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      dep.Name,
-		Namespace: m.Namespace,
-	}, found)
-	if err != nil && errors.IsNotFound(err) {
-
-		// Create the deployment
-		err = r.Client.Create(context.TODO(), dep)
-		if err != nil {
-			// Deployment failed
-			r.Log.Error(err, "Failed to create new Deployment")
-			return ctrl.Result{}, err
-		}
-
-		// Deployment was successful
-		r.Log.Info("Created a new Deployment")
-		condition := NewHubCondition(operatorv1.Progressing, metav1.ConditionTrue, NewComponentReason, "Created new resource")
-		SetHubCondition(&m.Status, *condition)
-		return ctrl.Result{}, nil
-
-	} else if err != nil {
-		// Error that isn't due to the deployment not existing
-		r.Log.Error(err, "Failed to get Deployment")
-		return ctrl.Result{}, err
-	}
-
-	return ctrl.Result{}, nil
-}
-
-func (r *MultiClusterHubReconciler) ensureNoDeployment(m *operatorv1.MultiClusterHub, dep *appsv1.Deployment) (ctrl.Result, error) {
-	dplog := r.Log.WithValues("Deployment.Namespace", dep.Namespace, "Deployment.Name", dep.Name)
-
-	unstructuredMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(dep)
-	if err != nil {
-		r.Log.Error(err, "Failed to unmarshal deployment")
-		return ctrl.Result{}, err
-	}
-	u := &unstructured.Unstructured{Object: unstructuredMap}
-	u.SetGroupVersionKind(schema.GroupVersionKind{Group: "apps", Kind: "Deployment", Version: "v1"})
-
-	_, err = r.uninstall(m, u)
-	if err != nil {
-		dplog.Error(err, "Failed to uninstall subscription")
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
-}
-
-func (r *MultiClusterHubReconciler) ensureNoUnstructured(m *operatorv1.MultiClusterHub, u *unstructured.Unstructured) (ctrl.Result, error) {
-	subLog := r.Log.WithValues("Namespace", u.GetNamespace(), "Name", u.GetName(), "Kind", u.GetKind())
-	_, err := r.uninstall(m, u)
-	if err != nil {
-		subLog.Error(err, "Failed to uninstall subscription")
-		return ctrl.Result{}, err
-	}
-	return ctrl.Result{}, nil
+	IngressDomain       string
+	ImageOverrides      map[string]string
+	ImageOverridesCM    string
+	ImageRepository     string
+	ManifestVersion     string
+	TemplateOverrides   map[string]string
+	TemplateOverridesCM string
 }
 
 func (r *MultiClusterHubReconciler) ensureNoNamespace(m *operatorv1.MultiClusterHub, u *unstructured.Unstructured) (ctrl.Result, error) {
-	subLog := r.Log.WithValues("Name", u.GetName(), "Kind", u.GetKind())
+	subLog := r.Log.WithValues("Kind", u.GetKind(), "Name", u.GetName())
 	gone, err := r.uninstall(m, u)
 	if err != nil {
 		subLog.Error(err, "Failed to uninstall namespace")
 		return ctrl.Result{}, err
 	}
-	if gone == true {
+	if gone {
 		return ctrl.Result{}, nil
 	} else {
 		return ctrl.Result{RequeueAfter: resyncPeriod}, nil
@@ -134,7 +70,7 @@ func (r *MultiClusterHubReconciler) ensureNoNamespace(m *operatorv1.MultiCluster
 }
 
 func (r *MultiClusterHubReconciler) ensureUnstructuredResource(m *operatorv1.MultiClusterHub, u *unstructured.Unstructured) (ctrl.Result, error) {
-	obLog := r.Log.WithValues("Namespace", u.GetNamespace(), "Name", u.GetName(), "Kind", u.GetKind())
+	obLog := r.Log.WithValues("Namespace", u.GetNamespace(), "Kind", u.GetKind(), "Name", u.GetName())
 
 	found := &unstructured.Unstructured{}
 	found.SetGroupVersionKind(u.GroupVersionKind())
@@ -167,24 +103,21 @@ func (r *MultiClusterHubReconciler) ensureUnstructuredResource(m *operatorv1.Mul
 	return ctrl.Result{}, nil
 }
 
-func (r *MultiClusterHubReconciler) ensureNamespace(m *operatorv1.MultiClusterHub, ns *corev1.Namespace) (ctrl.Result, error) {
+func (r *MultiClusterHubReconciler) ensureNamespace(m *operatorv1.MultiClusterHub, ns *corev1.Namespace) (
+	ctrl.Result, error) {
 	ctx := context.Background()
 
-	r.Log.Info(fmt.Sprintf("Ensuring namespace: %s", ns.GetName()))
-
 	existingNS := &corev1.Namespace{}
-	err := r.Client.Get(ctx, types.NamespacedName{
-		Name: ns.GetName(),
-	}, existingNS)
-	if err != nil && errors.IsNotFound(err) {
-		err = r.Client.Create(ctx, ns)
-		if err != nil {
-			r.Log.Info(fmt.Sprintf("Error creating namespace: %s", err.Error()))
+	if err := r.Client.Get(ctx, types.NamespacedName{Name: ns.GetName()}, existingNS); err != nil {
+		if errors.IsNotFound(err) {
+			if err = r.Client.Create(ctx, ns); err != nil {
+				r.Log.Info(fmt.Sprintf("Error creating namespace: %s", err.Error()))
+				return ctrl.Result{Requeue: true}, nil
+			}
+		} else {
+			r.Log.Info(fmt.Sprintf("error locating namespace: %s. Error: %s", ns.GetName(), err.Error()))
 			return ctrl.Result{Requeue: true}, nil
 		}
-	} else if err != nil {
-		r.Log.Info(fmt.Sprintf("error locating namespace: %s. Error: %s", ns.GetName(), err.Error()))
-		return ctrl.Result{Requeue: true}, nil
 	}
 
 	condition := NewHubCondition(operatorv1.Progressing, metav1.ConditionTrue, NewComponentReason, "Created new resource")
@@ -193,6 +126,7 @@ func (r *MultiClusterHubReconciler) ensureNamespace(m *operatorv1.MultiClusterHu
 	if existingNS.Status.Phase == corev1.NamespaceActive {
 		return ctrl.Result{}, nil
 	}
+
 	r.Log.Info(fmt.Sprintf("namespace '%s' is not in an active state", ns.GetName()))
 	return ctrl.Result{RequeueAfter: resyncPeriod}, nil
 }
@@ -235,7 +169,6 @@ func (r *MultiClusterHubReconciler) ensureOperatorGroup(m *operatorv1.MultiClust
 	}
 
 	return ctrl.Result{}, nil
-
 }
 
 func (r *MultiClusterHubReconciler) ensureMultiClusterEngineCR(ctx context.Context, m *operatorv1.MultiClusterHub) (ctrl.Result, error) {
@@ -245,27 +178,23 @@ func (r *MultiClusterHubReconciler) ensureMultiClusterEngineCR(ctx context.Conte
 	}
 
 	if mce == nil {
-		// figure out if assisted service is already configured
-		infraNS := ""
-		configured, err := AssistedServiceConfigured(ctx, r.Client)
-		if err != nil {
-			return ctrl.Result{Requeue: true}, err
-		}
-		if configured {
-			ns, err := utils.FindNamespace()
-			if err != nil {
-				return ctrl.Result{Requeue: true}, err
-			}
-			infraNS = ns
-		}
-
-		mce = multiclusterengine.NewMultiClusterEngine(m, infraNS)
+		mce = multiclusterengine.NewMultiClusterEngine(m)
 		err = r.Client.Create(ctx, mce)
 		if err != nil {
-			return ctrl.Result{Requeue: true}, fmt.Errorf("Error creating new MCE: %w", err)
+			return ctrl.Result{Requeue: true}, fmt.Errorf("error creating new MCE: %w", err)
 		}
 		return ctrl.Result{}, nil
 	}
+
+	// TODO: remove this when m.Spec.Hubsize is back
+	mceannotations := mce.GetAnnotations()
+	if mceannotations == nil {
+		mceannotations = map[string]string{}
+	}
+	mceannotations[mceutils.AnnotationHubSize] = string(utils.GetHubSize(m))
+
+	// TODO: put this back later
+	// mce.Spec.HubSize = mcev1.HubSize(m.Spec.HubSize)
 
 	// secret should be delivered to targetNamespace
 	if mce.Spec.TargetNamespace == "" {
@@ -279,7 +208,7 @@ func (r *MultiClusterHubReconciler) ensureMultiClusterEngineCR(ctx context.Conte
 	calcMCE := multiclusterengine.RenderMultiClusterEngine(mce, m)
 	err = r.Client.Update(ctx, calcMCE)
 	if err != nil {
-		return ctrl.Result{Requeue: true}, fmt.Errorf("Error updating MCE %s: %w", mce.Name, err)
+		return ctrl.Result{Requeue: true}, fmt.Errorf("error updating MCE %s: %w", mce.Name, err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -289,24 +218,17 @@ func (r *MultiClusterHubReconciler) ensurePullSecret(m *operatorv1.MultiClusterH
 	if m.Spec.ImagePullSecret == "" {
 		// Delete imagepullsecret in MCE namespace if present
 		secretList := &corev1.SecretList{}
-		err := r.Client.List(
-			context.TODO(),
-			secretList,
-			client.MatchingLabels{
-				"installer.name":      m.GetName(),
-				"installer.namespace": m.GetNamespace(),
-			},
-			client.InNamespace(newNS),
-		)
-		if err != nil {
-			return ctrl.Result{Requeue: true}, err
+		if err := r.Client.List(context.TODO(), secretList, client.MatchingLabels{"installer.name": m.GetName(),
+			"installer.namespace": m.GetNamespace()}, client.InNamespace(newNS)); err != nil {
+
+			return ctrl.Result{}, err
 		}
+
 		for i, secret := range secretList.Items {
 			r.Log.Info("Deleting imagePullSecret", "Name", secret.Name, "Namespace", secret.Namespace)
-			err = r.Client.Delete(context.TODO(), &secretList.Items[i])
-			if err != nil {
+			if err := r.Client.Delete(context.TODO(), &secretList.Items[i]); err != nil {
 				r.Log.Error(err, fmt.Sprintf("Error deleting imagepullsecret: %s", secret.GetName()))
-				return ctrl.Result{Requeue: true}, err
+				return ctrl.Result{}, err
 			}
 		}
 
@@ -314,18 +236,15 @@ func (r *MultiClusterHubReconciler) ensurePullSecret(m *operatorv1.MultiClusterH
 	}
 
 	pullSecret := &corev1.Secret{}
-	err := r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      m.Spec.ImagePullSecret,
-		Namespace: m.Namespace,
-	}, pullSecret)
-	if err != nil {
-		return ctrl.Result{Requeue: true}, err
+	if err := r.Client.Get(context.TODO(), types.NamespacedName{Name: m.Spec.ImagePullSecret, Namespace: m.Namespace},
+		pullSecret); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	mceSecret := &corev1.Secret{
 		TypeMeta: metav1.TypeMeta{
-			APIVersion: pullSecret.APIVersion,
-			Kind:       pullSecret.Kind,
+			APIVersion: "v1",
+			Kind:       "Secret",
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      pullSecret.Name,
@@ -335,16 +254,13 @@ func (r *MultiClusterHubReconciler) ensurePullSecret(m *operatorv1.MultiClusterH
 		Data: pullSecret.Data,
 		Type: corev1.SecretTypeDockerConfigJson,
 	}
-	mceSecret.SetName(m.Spec.ImagePullSecret)
-	mceSecret.SetNamespace(newNS)
-	mceSecret.SetLabels(pullSecret.Labels)
 	addInstallerLabelSecret(mceSecret, m.Name, m.Namespace)
 
 	force := true
-	err = r.Client.Patch(context.TODO(), mceSecret, client.Apply, &client.PatchOptions{Force: &force, FieldManager: "multiclusterhub-operator"})
-	if err != nil {
+	if err := r.Client.Patch(context.TODO(), mceSecret, client.Apply,
+		&client.PatchOptions{Force: &force, FieldManager: "multiclusterhub-operator"}); err != nil {
 		r.Log.Info(fmt.Sprintf("Error applying pullSecret to mce namespace: %s", err.Error()))
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 
 	return ctrl.Result{}, nil
@@ -353,7 +269,7 @@ func (r *MultiClusterHubReconciler) ensurePullSecret(m *operatorv1.MultiClusterH
 // checks if imagepullsecret was created in mch namespace
 func (r *MultiClusterHubReconciler) ensurePullSecretCreated(m *operatorv1.MultiClusterHub, namespace string) (ctrl.Result, error) {
 	if m.Spec.ImagePullSecret == "" {
-		//No imagepullsecret set, continuing
+		// No imagepullsecret set, continuing
 		return ctrl.Result{}, nil
 	}
 
@@ -363,53 +279,14 @@ func (r *MultiClusterHubReconciler) ensurePullSecretCreated(m *operatorv1.MultiC
 		Name:      m.Spec.ImagePullSecret,
 		Namespace: m.Namespace,
 	}, pullSecret)
-
 	if err != nil {
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 	if pullSecret.Namespace == "" || pullSecret.Namespace != namespace {
-		return ctrl.Result{Requeue: true}, fmt.Errorf("pullsecret doest not exist in namespace: %s", namespace)
+		return ctrl.Result{}, fmt.Errorf("pullsecret doest not exist in namespace: %s", namespace)
 	}
 
 	return ctrl.Result{}, nil
-}
-
-// OverrideImagesFromConfigmap ...
-func (r *MultiClusterHubReconciler) OverrideImagesFromConfigmap(imageOverrides map[string]string, namespace, configmapName string) (map[string]string, error) {
-	r.Log.Info(fmt.Sprintf("Overriding images from configmap: %s/%s", namespace, configmapName))
-
-	configmap := &corev1.ConfigMap{}
-	err := r.Client.Get(context.TODO(), types.NamespacedName{
-		Name:      configmapName,
-		Namespace: namespace,
-	}, configmap)
-	if err != nil && errors.IsNotFound(err) {
-		return imageOverrides, err
-	}
-
-	if len(configmap.Data) != 1 {
-		return imageOverrides, fmt.Errorf(fmt.Sprintf("Unexpected number of keys in configmap: %s", configmapName))
-	}
-
-	for _, v := range configmap.Data {
-
-		var manifestImages []manifest.ManifestImage
-		err = json.Unmarshal([]byte(v), &manifestImages)
-		if err != nil {
-			return nil, err
-		}
-
-		for _, manifestImage := range manifestImages {
-			if manifestImage.ImageDigest != "" {
-				imageOverrides[manifestImage.ImageKey] = fmt.Sprintf("%s/%s@%s", manifestImage.ImageRemote, manifestImage.ImageName, manifestImage.ImageDigest)
-			} else if manifestImage.ImageTag != "" {
-				imageOverrides[manifestImage.ImageKey] = fmt.Sprintf("%s/%s:%s", manifestImage.ImageRemote, manifestImage.ImageName, manifestImage.ImageTag)
-			}
-
-		}
-	}
-
-	return imageOverrides, nil
 }
 
 func (r *MultiClusterHubReconciler) maintainImageManifestConfigmap(mch *operatorv1.MultiClusterHub) error {
@@ -519,24 +396,6 @@ func (r *MultiClusterHubReconciler) listCustomResources(m *operatorv1.MultiClust
 	return ret, nil
 }
 
-// addInstallerLabel adds the installer name and namespace to a deployment's labels
-// so it can be watched. Returns false if the labels are already present.
-func addInstallerLabel(d *appsv1.Deployment, name string, ns string) bool {
-	updated := false
-	if d.Labels == nil {
-		d.Labels = map[string]string{}
-	}
-	if d.Labels["installer.name"] != name {
-		d.Labels["installer.name"] = name
-		updated = true
-	}
-	if d.Labels["installer.namespace"] != ns {
-		d.Labels["installer.namespace"] = ns
-		updated = true
-	}
-	return updated
-}
-
 // addInstallerLabelSecret adds the installer name and namespace to a secret's labels
 // so it can be watched. Returns false if the labels are already present.
 func addInstallerLabelSecret(d *corev1.Secret, name string, ns string) bool {
@@ -555,66 +414,33 @@ func addInstallerLabelSecret(d *corev1.Secret, name string, ns string) bool {
 	return updated
 }
 
-// labelDeployments updates deployments with installer labels if not already present
-func (r *MultiClusterHubReconciler) labelDeployments(hub *operatorv1.MultiClusterHub, dList []*appsv1.Deployment) error {
-	for _, d := range dList {
-		// Attach installer labels so we can keep our eyes on the deployment
-		if addInstallerLabel(d, hub.Name, hub.Namespace) {
-			r.Log.Info("Adding installer labels to deployment", "Name", d.Name)
-			err := r.Client.Update(context.TODO(), d)
-			if err != nil {
-				r.Log.Error(err, "Failed to update Deployment", "Name", d.Name)
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// GetSubscriptionIPInformation retrieves the current subscriptions installplan information for status
-func (r *MultiClusterHubReconciler) GetSubscription(sub *subv1alpha1.Subscription) (*unstructured.Unstructured, error) {
-	mceSubscription := &subv1alpha1.Subscription{}
-	err := r.Client.Get(context.Background(), types.NamespacedName{
-		Name:      sub.GetName(),
-		Namespace: sub.GetNamespace(),
-	}, mceSubscription)
-	if err != nil {
-		return nil, err
-	}
-	unstructuredSub, err := runtime.DefaultUnstructuredConverter.ToUnstructured(mceSubscription)
-	if err != nil {
-		r.Log.Error(err, "Failed to unmarshal subscription")
-		return nil, err
-	}
-	return &unstructured.Unstructured{Object: unstructuredSub}, nil
-}
-
 // ensureMCESubscription verifies resources needed for MCE are created
 func (r *MultiClusterHubReconciler) ensureMCESubscription(ctx context.Context, multiClusterHub *operatorv1.MultiClusterHub) (ctrl.Result, error) {
 	mceSub, err := multiclusterengine.FindAndManageMCESubscription(ctx, r.Client)
 	if err != nil {
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 
 	// Get sub config, catalogsource, and annotation overrides
 	subConfig, err := r.GetSubConfig()
 	if err != nil {
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 	overrides, err := multiclusterengine.GetAnnotationOverrides(multiClusterHub)
 	if err != nil {
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 	ctlSrc := types.NamespacedName{}
 	// Search for catalogsource if not defined in overrides
 	if overrides == nil || overrides.CatalogSource == "" {
-		ctlSrc, err = multiclusterengine.GetCatalogSource(r.UncachedClient)
+		ctlSrc, err = multiclusterengine.GetCatalogSource(r.Client)
 		if err != nil {
 			r.Log.Info("Failed to find a suitable catalogsource.", "error", err)
-			return ctrl.Result{RequeueAfter: 5 * time.Second}, err
+			return ctrl.Result{}, err
 		}
 	}
 
+	createSub := false
 	if mceSub == nil {
 		result, err := r.ensureNamespace(multiClusterHub, multiclusterengine.Namespace())
 		if result != (ctrl.Result{}) {
@@ -630,6 +456,7 @@ func (r *MultiClusterHubReconciler) ensureMCESubscription(ctx context.Context, m
 		}
 		// Sub is nil so create a new one
 		mceSub = multiclusterengine.NewSubscription(multiClusterHub, subConfig, overrides, utils.IsCommunityMode())
+		createSub = true
 	} else if multiclusterengine.CreatedByMCH(mceSub, multiClusterHub) {
 		result, err := r.ensurePullSecret(multiClusterHub, multiclusterengine.Namespace().Name)
 		if result != (ctrl.Result{}) {
@@ -643,13 +470,15 @@ func (r *MultiClusterHubReconciler) ensureMCESubscription(ctx context.Context, m
 
 	// Apply MCE sub
 	calcSub := multiclusterengine.RenderSubscription(mceSub, subConfig, overrides, ctlSrc, utils.IsCommunityMode())
-
-	force := true
-	err = r.Client.Patch(ctx, calcSub, client.Apply, &client.PatchOptions{Force: &force, FieldManager: "multiclusterhub-operator"})
-	if err != nil {
-		r.Log.Info(fmt.Sprintf("Error applying subscription: %s", err.Error()))
-		return ctrl.Result{Requeue: true}, err
+	if createSub {
+		err = r.Client.Create(ctx, calcSub)
+	} else {
+		err = r.Client.Update(ctx, calcSub)
 	}
+	if err != nil {
+		return ctrl.Result{Requeue: true}, fmt.Errorf("error updating subscription %s: %w", calcSub.Name, err)
+	}
+
 	return ctrl.Result{}, nil
 }
 
@@ -673,10 +502,10 @@ func (r *MultiClusterHubReconciler) waitForMCEReady(ctx context.Context) (ctrl.R
 	// Wait for MCE to be ready
 	existingMCE, err := multiclusterengine.GetManagedMCE(ctx, r.Client)
 	if err != nil {
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 	if existingMCE == nil {
-		r.Log.Info(fmt.Sprintf("Multiclusterengine: %s is not yet present", existingMCE.GetName()))
+		r.Log.Info("Multiclusterengine is not yet present")
 		return ctrl.Result{Requeue: true}, nil
 	}
 	if utils.IsUnitTest() {
@@ -688,9 +517,14 @@ func (r *MultiClusterHubReconciler) waitForMCEReady(ctx context.Context) (ctrl.R
 		return ctrl.Result{RequeueAfter: resyncPeriod}, nil
 	}
 
-	err = version.ValidMCEVersion(existingMCE.Status.CurrentVersion)
+	// MCE version depends on mode
+	if utils.IsCommunityMode() {
+		err = version.ValidCommunityMCEVersion(existingMCE.Status.CurrentVersion)
+	} else {
+		err = version.ValidMCEVersion(existingMCE.Status.CurrentVersion)
+	}
 	if err != nil {
-		return ctrl.Result{RequeueAfter: resyncPeriod}, fmt.Errorf("MCE version requirement not met: %w", err)
+		return ctrl.Result{}, fmt.Errorf("MCE version requirement not met: %w", err)
 	}
 	return ctrl.Result{}, nil
 }
@@ -698,7 +532,7 @@ func (r *MultiClusterHubReconciler) waitForMCEReady(ctx context.Context) (ctrl.R
 // GetCSVFromSubscription retrieves CSV status information from the related subscription for status
 func (r *MultiClusterHubReconciler) GetCSVFromSubscription(sub *subv1alpha1.Subscription) (*unstructured.Unstructured, error) {
 	if sub == nil {
-		return nil, fmt.Errorf("Cannot find CSV from nil Subscription")
+		return nil, fmt.Errorf("cannot find CSV from nil Subscription")
 	}
 	mceSubscription := &subv1alpha1.Subscription{}
 	err := r.Client.Get(context.Background(), types.NamespacedName{
@@ -722,138 +556,13 @@ func (r *MultiClusterHubReconciler) GetCSVFromSubscription(sub *subv1alpha1.Subs
 	if err != nil {
 		return nil, err
 	}
-	csv, err := runtime.DefaultUnstructuredConverter.ToUnstructured(mceCSV)
-	if err != nil {
+
+	csv := &unstructured.Unstructured{}
+	if err := r.Scheme.Convert(mceCSV, csv, nil); err != nil {
 		return nil, err
 	}
-	return &unstructured.Unstructured{Object: csv}, nil
-}
 
-// isACMManaged returns whether this application is managed by OLM via an ACM subscription
-func isACMManaged(deploy *appsv1.Deployment) bool {
-	labels := deploy.GetLabels()
-	if labels == nil {
-		return false
-	}
-	if owner, ok := labels["olm.owner"]; ok {
-		if strings.Contains(owner, "advanced-cluster-management") {
-			return true
-		}
-	}
-	return false
-}
-
-// getDeploymentByName returns the deployment with the matching name found from a list
-func getDeploymentByName(allDeps []*appsv1.Deployment, desiredDeploy string) (*appsv1.Deployment, bool) {
-	for i := range allDeps {
-		if allDeps[i].Name == desiredDeploy {
-			return allDeps[i], true
-		}
-	}
-	return nil, false
-}
-
-func addProxyEnvVarsToDeployment(dep *appsv1.Deployment) *appsv1.Deployment {
-	proxyEnvVars := []corev1.EnvVar{
-		{
-			Name:  "HTTP_PROXY",
-			Value: os.Getenv("HTTP_PROXY"),
-		},
-		{
-			Name:  "HTTPS_PROXY",
-			Value: os.Getenv("HTTPS_PROXY"),
-		},
-		{
-			Name:  "NO_PROXY",
-			Value: os.Getenv("NO_PROXY"),
-		},
-	}
-	for i := 0; i < len(dep.Spec.Template.Spec.Containers); i++ {
-		dep.Spec.Template.Spec.Containers[i].Env = append(dep.Spec.Template.Spec.Containers[i].Env, proxyEnvVars...)
-	}
-
-	return dep
-}
-
-func addProxyEnvVarsToSub(u *unstructured.Unstructured) *unstructured.Unstructured {
-	path := "spec.packageOverrides[].packageOverrides[].value.hubconfig."
-
-	sub, err := injectMapIntoUnstructured(u.Object, path, map[string]interface{}{
-		"proxyConfigs": map[string]interface{}{
-			"HTTP_PROXY":  os.Getenv("HTTP_PROXY"),
-			"HTTPS_PROXY": os.Getenv("HTTPS_PROXY"),
-			"NO_PROXY":    os.Getenv("NO_PROXY"),
-		},
-	})
-	if err != nil {
-		// log.Info(fmt.Sprintf("Error inject proxy environmental variables into '%s' subscription: %s", u.GetName(), err.Error()))
-	}
-	u.Object = sub
-
-	return u
-}
-
-// injects map into an unstructured objects map based off a given path
-func injectMapIntoUnstructured(u map[string]interface{}, path string, mapToInject map[string]interface{}) (map[string]interface{}, error) {
-
-	currentKey := strings.Split(path, ".")[0]
-	isArr := false
-	if strings.HasSuffix(currentKey, "[]") {
-		isArr = true
-	}
-	currentKey = strings.TrimSuffix(currentKey, "[]")
-	if i := strings.Index(path, "."); i >= 0 {
-		// Determine remaining path
-		path = path[(i + 1):]
-		// If Arr, loop through each element of array
-		if isArr {
-			nextMap, ok := u[currentKey].([]map[string]interface{})
-			if !ok {
-				return u, fmt.Errorf("Failed to find key: %s", currentKey)
-			}
-			for i := 0; i < len(nextMap); i++ {
-				_, err := injectMapIntoUnstructured(nextMap[i], path, mapToInject)
-				if err != nil {
-					return u, err
-				}
-			}
-			return u, nil
-		} else {
-			nextMap, ok := u[currentKey].(map[string]interface{})
-			if !ok {
-				return u, fmt.Errorf("Failed to find key: %s", currentKey)
-			}
-			_, err := injectMapIntoUnstructured(nextMap, path, mapToInject)
-			if err != nil {
-				return u, err
-			}
-			return u, nil
-		}
-	} else {
-		for key, val := range mapToInject {
-			u[key] = val
-			break
-		}
-		return u, nil
-	}
-}
-
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
-func remove(list []string, s string) []string {
-	for i, v := range list {
-		if v == s {
-			list = append(list[:i], list[i+1:]...)
-		}
-	}
-	return list
+	return csv, nil
 }
 
 // mergeErrors combines errors into a single string
@@ -868,7 +577,7 @@ func mergeErrors(errs []error) string {
 // GetSubConfig returns a SubscriptionConfig based on proxy variables and the mch operator configuration
 func (r *MultiClusterHubReconciler) GetSubConfig() (*subv1alpha1.SubscriptionConfig, error) {
 	found := &appsv1.Deployment{}
-	mchOperatorNS, err := utils.FindNamespace()
+	mchOperatorNS, err := utils.OperatorNamespace()
 	if err != nil {
 		return nil, err
 	}
@@ -914,7 +623,7 @@ func (r *MultiClusterHubReconciler) addPluginToConsole(multiClusterHub *operator
 	err := r.Client.Get(ctx, types.NamespacedName{Name: "cluster"}, console)
 	if err != nil {
 		log.Info("Failed to find console: cluster")
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 
 	if console.Spec.Plugins == nil {
@@ -928,7 +637,7 @@ func (r *MultiClusterHubReconciler) addPluginToConsole(multiClusterHub *operator
 		err = r.Client.Update(ctx, console)
 		if err != nil {
 			log.Info("Failed to add acm consoleplugin to console")
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		} else {
 			log.Info("Added acm consoleplugin to console")
 		}
@@ -947,7 +656,7 @@ func (r *MultiClusterHubReconciler) removePluginFromConsole(multiClusterHub *ope
 	err := r.Client.Get(ctx, types.NamespacedName{Name: "cluster"}, console)
 	if err != nil {
 		log.Info("Failed to find console: cluster")
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 
 	// If No plugins, it is already removed
@@ -961,7 +670,7 @@ func (r *MultiClusterHubReconciler) removePluginFromConsole(multiClusterHub *ope
 		err = r.Client.Update(ctx, console)
 		if err != nil {
 			log.Info("Failed to remove acm consoleplugin to console")
-			return ctrl.Result{Requeue: true}, err
+			return ctrl.Result{}, err
 		} else {
 			log.Info("Removed acm consoleplugin to console")
 		}
@@ -1012,7 +721,7 @@ func (r *MultiClusterHubReconciler) getClusterVersion(ctx context.Context) (stri
 	}
 
 	if len(clusterVersion.Status.History) == 0 {
-		return "", e.New("Failed to detect status in clusterversion.status.history")
+		return "", e.New("failed to detect status in clusterversion.status.history")
 	}
 	return clusterVersion.Status.History[0].Version, nil
 }
@@ -1020,72 +729,116 @@ func (r *MultiClusterHubReconciler) getClusterVersion(ctx context.Context) (stri
 func (r *MultiClusterHubReconciler) ensureSearchCR(m *operatorv1.MultiClusterHub) (ctrl.Result, error) {
 	ctx := context.Background()
 
-	// If assisted installer is set up MCE needs to override the infrastructure
-	// operator namespace
-	searchList := &searchv2v1alpha1.SearchList{}
-	err := r.Client.List(ctx, searchList, client.InNamespace(m.GetNamespace()))
+	searchCR := &searchv2v1alpha1.Search{
+		TypeMeta: metav1.TypeMeta{
+			APIVersion: searchv2v1alpha1.GroupVersion.String(),
+			Kind:       "Search",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "search-v2-operator",
+			Namespace: m.Namespace,
+			Labels:    map[string]string{"cluster.open-cluster-management.io/backup": ""},
+		},
+		Spec: searchv2v1alpha1.SearchSpec{
+			NodeSelector: m.Spec.NodeSelector,
+			Tolerations:  utils.GetTolerations(m),
+		},
+	}
+	force := true
+	err := r.Client.Patch(ctx, searchCR, client.Apply, &client.PatchOptions{Force: &force, FieldManager: "multiclusterhub-operator"})
 	if err != nil {
-		r.Log.Info(fmt.Sprintf("error locating Search CR. Error: %s", err.Error()))
-		return ctrl.Result{Requeue: true}, err
+		r.Log.Info(fmt.Sprintf("error applying Search CR. Error: %s", err.Error()))
+		return ctrl.Result{}, err
 	}
 
-	if len(searchList.Items) == 0 {
-		searchCR := &searchv2v1alpha1.Search{
-			TypeMeta: metav1.TypeMeta{
-				APIVersion: searchv2v1alpha1.GroupVersion.String(),
-				Kind:       "Search",
-			},
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "search-v2-operator",
-				Namespace: m.Namespace,
-			},
-			Spec: searchv2v1alpha1.SearchSpec{
-				NodeSelector: m.Spec.NodeSelector,
-				Tolerations:  utils.GetTolerations(m),
-			},
-		}
-		force := true
-		err = r.Client.Patch(ctx, searchCR, client.Apply, &client.PatchOptions{Force: &force, FieldManager: "multiclusterhub-operator"})
-		if err != nil {
-			r.Log.Info(fmt.Sprintf("error creating Search CR. Error: %s", err.Error()))
-			return ctrl.Result{Requeue: true}, err
-		}
-	}
 	return ctrl.Result{}, nil
+}
 
+func (r *MultiClusterHubReconciler) ensureNoClusterManagementAddOn(m *operatorv1.MultiClusterHub, component string) (
+	ctrl.Result, error,
+) {
+	ctx := context.Background()
+
+	addonName, err := operatorv1.GetClusterManagementAddonName(component)
+	if err != nil {
+		r.Log.Info(fmt.Sprintf("Detected unregistered ClusterManagementAddon component: %s", err.Error()))
+		return ctrl.Result{}, err
+	}
+
+	// if CRD doesn't exist, return
+	cmaCRD := &apixv1.CustomResourceDefinition{}
+	err = r.Client.Get(context.Background(), types.NamespacedName{Name: "clustermanagementaddons.addon.open-cluster-management.io"}, cmaCRD)
+	if errors.IsNotFound(err) {
+		return ctrl.Result{}, nil
+	}
+
+	clusterMgmtAddon := &ocmapi.ClusterManagementAddOn{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: addonName,
+		},
+	}
+
+	foreground := metav1.DeletePropagationForeground
+	err = r.Client.Delete(context.TODO(), clusterMgmtAddon, &client.DeleteOptions{
+		PropagationPolicy: &foreground,
+	})
+
+	if errors.IsNotFound(err) {
+		return ctrl.Result{}, nil
+	}
+
+	if err != nil {
+		r.Log.Error(err, "Error deleting ClusterManagementAddOn CR")
+
+		return ctrl.Result{}, err
+	}
+
+	r.Log.Info("Deleting the ClusterManagementAddOn CR", "name", addonName)
+
+	err = r.Client.Get(ctx, types.NamespacedName{Name: clusterMgmtAddon.GetName()}, clusterMgmtAddon)
+	if errors.IsNotFound(err) {
+		r.Log.Info("Successfully deleted the ClusterManagementAddOn CR", "name", addonName)
+
+		return ctrl.Result{}, nil
+	}
+
+	if err != nil {
+		r.Log.Error(err, "Failed to get the ClusterManagementAddOn CR", "name", addonName)
+
+		return ctrl.Result{}, err
+	}
+
+	return ctrl.Result{}, errors.NewBadRequest("ClusterManagementAddOn CR has not been deleted")
 }
 
 func (r *MultiClusterHubReconciler) ensureNoSearchCR(m *operatorv1.MultiClusterHub) (ctrl.Result, error) {
 	ctx := context.Background()
 
-	// If assisted installer is set up MCE needs to override the infrastructure
-	// operator namespace
 	searchList := &searchv2v1alpha1.SearchList{}
 	err := r.Client.List(ctx, searchList, client.InNamespace(m.GetNamespace()))
 	if err != nil {
 		r.Log.Info(fmt.Sprintf("error locating Search CR. Error: %s", err.Error()))
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 
 	if len(searchList.Items) != 0 {
 		err = r.Client.Delete(context.TODO(), &searchList.Items[0])
 		if err != nil {
-			r.Log.Error(err, fmt.Sprintf("Error deleting Search CR"))
-			return ctrl.Result{Requeue: true}, err
+			r.Log.Error(err, "Error deleting Search CR")
+			return ctrl.Result{}, err
 		}
 
 	}
 	err = r.Client.List(ctx, searchList, client.InNamespace(m.GetNamespace()))
 	if err != nil {
 		r.Log.Info(fmt.Sprintf("error locating Search CR. Error: %s", err.Error()))
-		return ctrl.Result{Requeue: true}, err
+		return ctrl.Result{}, err
 	}
 	if len(searchList.Items) != 0 {
-		r.Log.Info(fmt.Sprintf("Waiting for Search CR to be deleted"))
-		return ctrl.Result{Requeue: true}, errors.NewBadRequest("Search CR has not been deleted")
+		r.Log.Info("Waiting for Search CR to be deleted")
+		return ctrl.Result{}, errors.NewBadRequest("Search CR has not been deleted")
 	}
 	return ctrl.Result{}, nil
-
 }
 
 // Checks if OCP Console is enabled and return true if so. If <OCP v4.12, always return true
@@ -1109,7 +862,7 @@ func (r *MultiClusterHubReconciler) CheckConsole(ctx context.Context) (bool, err
 	}
 	// -0 allows for prerelease builds to pass the validation.
 	// If -0 is removed, developer/rc builds will not pass this check
-	//OCP Console can only be disabled in OCP 4.12+
+	// OCP Console can only be disabled in OCP 4.12+
 	constraint, err := semver.NewConstraint(">= 4.12.0-0")
 	if err != nil {
 		return false, fmt.Errorf("failed to set ocp version constraint: %w", err)

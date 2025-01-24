@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -35,6 +34,10 @@ type ManifestImage struct {
 	ImageDigest string `json:"image-digest"`
 
 	ImageTag string `json:"image-tag"`
+}
+
+type ManifestTemplate struct {
+	TemplateOverrides map[string]interface{} `json:"templateOverrides" yaml:"templateOverrides"`
 }
 
 // GetImageOverrides Reads and formats full image reference from image manifest file.
@@ -90,7 +93,7 @@ func readManifestFile(version string) ([]byte, error) {
 	}
 
 	filePath := path.Join(manifestsPath, version+".json")
-	contents, err := ioutil.ReadFile(filepath.Clean(filePath)) // #nosec G304 (filepath cleaned)
+	contents, err := os.ReadFile(filepath.Clean(filePath)) // #nosec G304 (filepath cleaned)
 	if err != nil {
 		log.Error(err, "Failed to read image manifest", "Path", filePath)
 		return nil, err

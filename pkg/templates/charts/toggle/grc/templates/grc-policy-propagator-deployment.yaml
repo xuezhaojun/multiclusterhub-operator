@@ -19,6 +19,8 @@ spec:
       release: grc
   template:
     metadata:
+      annotations:
+        kubectl.kubernetes.io/default-container: governance-policy-propagator
       labels:
         app: grc
         ocm-antiaffinity-selector: "grcpolicypropagator"
@@ -78,25 +80,6 @@ spec:
         {{- end }}
       {{- end }}
       containers:
-      - name: kube-rbac-proxy
-        image: {{ .Values.global.imageOverrides.kube_rbac_proxy}}
-        imagePullPolicy: "{{ .Values.global.pullPolicy }}"
-        args:
-        - --secure-listen-address=0.0.0.0:8443
-        - --upstream=http://127.0.0.1:8383/
-        - --logtostderr=true
-        - --v=6
-        - "--tls-cert-file=/var/run/policy-metrics-cert/tls.crt"
-        - "--tls-private-key-file=/var/run/policy-metrics-cert/tls.key"
-        - "--tls-min-version=VersionTLS13"
-        ports:
-        - containerPort: 8443
-          name: https
-          protocol: TCP
-        volumeMounts:
-        - mountPath: "/var/run/policy-metrics-cert"
-          name: metrics-cert
-          readOnly: true
       - name: governance-policy-propagator
         image: {{ .Values.global.imageOverrides.governance_policy_propagator}}
         imagePullPolicy: "{{ .Values.global.pullPolicy }}"
@@ -104,6 +87,13 @@ spec:
           requests:
             memory: "64Mi"
             cpu: "25m"
+        ports:
+        - containerPort: 8443
+          name: metrics-https
+          protocol: TCP
+        - containerPort: 9443
+          name: webhook-http
+          protocol: TCP
         securityContext:
           privileged: false
           readOnlyRootFilesystem: true
@@ -112,7 +102,11 @@ spec:
           capabilities:
             drop:
             - ALL
-        command: ["governance-policy-propagator"]
+        command:
+        - governance-policy-propagator
+        args:
+        - "--secure-metrics=true"
+        - "--metrics-bind-address=0.0.0.0:8443"
         env:
           - name: WATCH_NAMESPACE
             value: ""
@@ -135,14 +129,24 @@ spec:
           initialDelaySeconds: 15
           periodSeconds: 15
         volumeMounts:
+        - mountPath: "/var/run/metrics-cert"
+          name: metrics-cert
+          readOnly: true
         - name: tmp
           mountPath: "/tmp"
+        - mountPath: /tmp/k8s-webhook-server/serving-certs
+          name: cert
+          readOnly: true
       volumes:
       - name: tmp
         emptyDir: {}
       - name: metrics-cert
         secret:
           secretName: grc-grc-metrics-cert
+      - name: cert
+        secret:
+          defaultMode: 420
+          secretName: propagator-webhook-server-cert
       {{- if .Values.global.pullSecret  }}
       imagePullSecrets:
       - name: {{ .Values.global.pullSecret  }}

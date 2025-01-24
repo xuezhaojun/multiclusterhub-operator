@@ -15,8 +15,10 @@ spec:
   apiservicedefinitions: {}
   customresourcedefinitions:
     owned:
-    - description: MultiClusterHub defines the configuration for an instance of the
-        MultiCluster Hub
+    - description: MulticlusterHub defines the configuration for an instance of a
+        multicluster hub, a central point for managing multiple Kubernetes-based clusters.
+        The deployment of multicluster hub components is determined based on the configuration
+        that is defined in this resource.
       displayName: MultiClusterHub
       kind: MultiClusterHub
       name: multiclusterhubs.operator.open-cluster-management.io
@@ -29,8 +31,8 @@ spec:
         - urn:alm:descriptor:com.tectonic.ui:advanced
         - urn:alm:descriptor:com.tectonic.ui:select:High
         - urn:alm:descriptor:com.tectonic.ui:select:Basic
-      - description: Provide the customized OpenShift default ingress CA certificate
-          to RHACM
+      - description: (Deprecated) Provide the customized OpenShift default ingress
+          CA certificate to RHACM
         displayName: Custom CA Configmap
         path: customCAConfigmap
         x-descriptors:
@@ -80,7 +82,8 @@ spec:
         path: overrides
         x-descriptors:
         - urn:alm:descriptor:com.tectonic.ui:hidden
-      - description: Provides optional configuration for components
+      - description: 'Provides optional configuration for components, the list of
+          which can be found here: https://github.com/stolostron/multiclusterhub-operator/tree/main/docs/available-components.md'
         displayName: Component Configuration
         path: overrides.components
         x-descriptors:

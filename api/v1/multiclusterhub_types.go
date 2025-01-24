@@ -26,11 +26,23 @@ import (
 // AvailabilityType ...
 type AvailabilityType string
 
+// DeploymentMode ...
+type DeploymentMode string
+
 const (
 	// HABasic stands up most app subscriptions with a replicaCount of 1
 	HABasic AvailabilityType = "Basic"
 	// HAHigh stands up most app subscriptions with a replicaCount of 2
 	HAHigh AvailabilityType = "High"
+)
+
+type HubSize string
+
+const (
+	Small  HubSize = "Small"
+	Medium HubSize = "Medium"
+	Large  HubSize = "Large"
+	XLarge HubSize = "XLarge"
 )
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
@@ -62,6 +74,15 @@ type MultiClusterHubSpec struct {
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Hive Config",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:hidden"}
 	Hive *HiveConfigSpec `json:"hive,omitempty"`
 
+	// TODO: Put this back later
+	// // The resource allocation bucket for this hub to use.
+	// // [Small, Medium, Large, XLarge]. Defaults to Small if not specified.
+	// //+kubebuilder:validation:Enum:=Small;Medium;Large;XLarge
+	// //+kubebuilder:default:=Small
+	// //+kubebuilder:validation:Type:=string
+	// //+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Hub Size",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:hidden"}
+	// HubSize HubSize `json:"hubSize,omitempty"`
+
 	// (Deprecated) Configuration options for ingress management
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Ingress Management",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced"}
 	Ingress IngressSpec `json:"ingress,omitempty"`
@@ -70,7 +91,7 @@ type MultiClusterHubSpec struct {
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Developer Overrides",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:hidden"}
 	Overrides *Overrides `json:"overrides,omitempty"`
 
-	// Provide the customized OpenShift default ingress CA certificate to RHACM
+	// (Deprecated) Provide the customized OpenShift default ingress CA certificate to RHACM
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Custom CA Configmap",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:advanced","urn:alm:descriptor:io.kubernetes:ConfigMap"}
 	CustomCAConfigmap string `json:"customCAConfigmap,omitempty"`
 
@@ -97,7 +118,7 @@ type Overrides struct {
 	// Pull policy of the MultiCluster hub images
 	ImagePullPolicy corev1.PullPolicy `json:"imagePullPolicy,omitempty"`
 
-	// Provides optional configuration for components
+	// Provides optional configuration for components, the list of which can be found here: https://github.com/stolostron/multiclusterhub-operator/tree/main/docs/available-components.md
 	//+operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Component Configuration",xDescriptors={"urn:alm:descriptor:com.tectonic.ui:hidden"}
 	// +optional
 	Components []ComponentConfig `json:"components,omitempty"`
@@ -105,8 +126,47 @@ type Overrides struct {
 
 // ComponentConfig provides optional configuration items for individual components
 type ComponentConfig struct {
-	Name    string `json:"name"`
-	Enabled bool   `json:"enabled"`
+	// Enabled specifies whether the component is enabled or disabled.
+	Enabled bool `json:"enabled"`
+
+	// Name denotes the name of the component being configured.
+	Name string `json:"name"`
+
+	// ConfigOverrides contains optional configuration overrides for deployments and containers.
+	ConfigOverrides ConfigOverride `json:"configOverrides,omitempty"`
+}
+
+// ConfigOverride holds overrides for configurations specific to deployments and containers.
+type ConfigOverride struct {
+	// Deployments is a list of deployment specific configuration overrides.
+	Deployments []DeploymentConfig `json:"deployments,omitempty"`
+}
+
+// DeploymentConfig provides configuration details for a specific deployment.
+type DeploymentConfig struct {
+	// Name specifies the name of the deployment being configured.
+	Name string `json:"name"`
+
+	// Containers is a list of container specific configurations within the deployment.
+	Containers []ContainerConfig `json:"containers"`
+}
+
+// ContainerConfig holds configuration details for a specific container within a deployment.
+type ContainerConfig struct {
+	// Name specifies the name of the container being configured.
+	Name string `json:"name"`
+
+	// Env is a list of environment variable overrides for the container.
+	Env []EnvConfig `json:"env"`
+}
+
+// EnvConfig represents an override for an environment variable within a container.
+type EnvConfig struct {
+	// Name specifies the name of the environment variable.
+	Name string `json:"name,omitempty"`
+
+	// Value specifies the value of the environment variable.
+	Value string `json:"value,omitempty"`
 }
 
 type HiveConfigSpec struct {
@@ -219,11 +279,13 @@ type HubPhaseType string
 
 const (
 	HubPending         HubPhaseType = "Pending"
+	HubPaused          HubPhaseType = "Paused"
 	HubRunning         HubPhaseType = "Running"
 	HubInstalling      HubPhaseType = "Installing"
 	HubUpdating        HubPhaseType = "Updating"
 	HubUninstalling    HubPhaseType = "Uninstalling"
 	HubUpdatingBlocked HubPhaseType = "UpdatingBlocked"
+	HubError           HubPhaseType = "Error"
 )
 
 // MultiClusterHubStatus defines the observed state of MultiClusterHub
@@ -248,8 +310,11 @@ type MultiClusterHubStatus struct {
 
 // StatusCondition contains condition information.
 type StatusCondition struct {
+	// The component name
+	Name string `json:"name,omitempty"`
+
 	// The resource kind this condition represents
-	Kind string `json:"-"`
+	Kind string `json:"kind,omitempty"`
 
 	// Available indicates whether this component is considered properly running
 	Available bool `json:"-"`
@@ -291,6 +356,9 @@ const (
 
 	// Bocked means there is something preventing an update from occurring
 	Blocked HubConditionType = "Blocked"
+
+	// ComponentFailure means a deployment failed during an Apply
+	ComponentFailure HubConditionType = "ComponentFailure"
 )
 
 // StatusCondition contains condition information.
@@ -322,9 +390,14 @@ type HubCondition struct {
 //+kubebuilder:subresource:status
 //+kubebuilder:resource:path=multiclusterhubs,scope=Namespaced,shortName=mch
 
-// MultiClusterHub defines the configuration for an instance of the MultiCluster Hub
-// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase",description="The overall status of the multiclusterhub"
+// MulticlusterHub defines the configuration
+// for an instance of a multicluster hub, a central point for managing multiple
+// Kubernetes-based clusters. The deployment of multicluster hub components
+// is determined based on the configuration that is defined in this resource.
+// +kubebuilder:printcolumn:name="Status",type="string",JSONPath=".status.phase",description="The overall status of the MultiClusterHub"
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="CurrentVersion",type="string",JSONPath=".status.currentVersion",description="The current version of the MultiClusterHub"
+// +kubebuilder:printcolumn:name="DesiredVersion",type="string",JSONPath=".status.desiredVersion",description="The desired version of the MultiClusterHub"
 // +operator-sdk:csv:customresourcedefinitions:displayName="MultiClusterHub"
 type MultiClusterHub struct {
 	metav1.TypeMeta   `json:",inline"`
@@ -343,6 +416,24 @@ type MultiClusterHubList struct {
 	Items           []MultiClusterHub `json:"items"`
 }
 
+// +kubebuilder:object:root=true
+// +operator-sdk:csv:customresourcedefinitions:displayName="InternalHubComponent"
+type InternalHubComponent struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	Spec              InternalHubComponentSpec `json:"spec,omitempty"`
+}
+
+// +kubebuilder:object:root=true
+type InternalHubComponentList struct {
+	metav1.TypeMeta `json:",inline"`
+	metav1.ListMeta `json:"metadata,omitempty"`
+	Items           []InternalHubComponent `json:"items"`
+}
+
+type InternalHubComponentSpec struct{}
+
 func init() {
 	SchemeBuilder.Register(&MultiClusterHub{}, &MultiClusterHubList{})
+	SchemeBuilder.Register(&InternalHubComponent{}, &InternalHubComponentList{})
 }

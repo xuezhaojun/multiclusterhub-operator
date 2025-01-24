@@ -26,6 +26,96 @@ spec:
         apiVersion: policy.open-cluster-management.io/v1
         kind: ConfigurationPolicy
         metadata:
+          name: vm-config-setup
+        spec:
+          remediationAction: enforce
+          severity: high
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: acm-dr-virt-restore-config
+                  namespace: open-cluster-management-backup
+                data:
+                  clusterID_restoreName: ""
+                  clusterID_vmsUID: "uid1 uid2"
+                  clusterID_backupName: backupName
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: acm-dr-virt-schedule-cron
+                  namespace: open-cluster-management-backup
+                data:
+                  hourly: "0 */1 * * *"
+                  every_2_hours: "0 */2 * * *"
+                  every_3_hours: "0 */3 * * *"
+                  every_4_hours: "0 */4 * * *"
+                  every_5_hours: "0 */5 * * *"
+                  every_6_hours: "0 */6 * * *"
+                  twice_a_day: "0 */12 * * *"
+                  daily_8am: "0 8 * * *"
+                  every_sunday: "0 0 * * 0"
+            - complianceType: musthave
+              recordDiff: InStatus
+              objectDefinition:
+                apiVersion: v1
+                kind: ConfigMap
+                metadata:
+                  name: acm-dr-virt-config
+                  namespace: open-cluster-management-backup
+                data:
+                  backupNS: open-cluster-management-backup
+                  channel: stable-1.4
+                  credentials_hub_secret_name: cloud-credentials
+                  credentials_name: cloud-credentials
+                  dpa_name: dpa-vm-policy
+                  scheduleTTL: 120h
+                  schedule_hub_config_name: acm-dr-virt-schedule-cron
+                  restore_hub_config_name: acm-dr-virt-restore-config
+                  dpa_spec: "{
+                  backupLocations: [
+                    {
+                      velero: {
+                        config: {
+                          profile: default,
+                          region: us-east-1-change-me,
+                        },
+                        credential: {
+                          key: cloud,
+                          name: cloud-credentials,
+                        },
+                        default: true,
+                        objectStorage: {
+                          bucket: velero-bucket-change-me,
+                          prefix: velero-prefix-change-me,
+                        },
+                        provider: aws
+                      }
+                    }
+                  ],
+                  configuration: {
+                    nodeAgent: {
+                      enable: true,
+                      uploaderType: kopia,
+                    },
+                    velero: {
+                      defaultPlugins: [
+                        csi,       
+                        openshift,
+                        kubevirt,
+                        aws
+                      ],
+                    }
+                  },
+                }"
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
           name: acm-backup-pod-running
         spec:
           object-templates:
@@ -41,6 +131,9 @@ spec:
                   phase: Running
           remediationAction: inform
           severity: high
+          customMessage:
+            noncompliant: |-
+              The cluster-backup-chart-clusterbackup pod is either not running in the open-cluster-management-backup namespace or there is an error. 
     - objectDefinition:
         apiVersion: policy.open-cluster-management.io/v1
         kind: ConfigurationPolicy
@@ -58,6 +151,11 @@ spec:
                   namespace: open-cluster-management-backup
                 status:
                   phase: Running
+          customMessage:
+            noncompliant: |-
+              The openshift-adp-controller-manager pod is either not running in the open-cluster-management-backup namespace or there is an error. 
+              If the openshift-adp-controller-manager pod is not running in the open-cluster-management-backup namespace, check the 
+              multiclusterhub-operator pod for errors related to the OADP operator installation.
           remediationAction: inform
           severity: high 
     - objectDefinition:
@@ -77,6 +175,11 @@ spec:
                   namespace: open-cluster-management-backup
                 status:
                   phase: Running
+          customMessage:
+            noncompliant: |-
+              The velero pod is either not running in the open-cluster-management-backup namespace or there is an error. 
+              Velero is installed by the oadp.openshift.io.DataProtectionApplication resource, so if the pod is not running,
+              verify that you have a valid oadp.openshift.io.DataProtectionApplication resource in the open-cluster-management-backup namespace.
           remediationAction: inform
           severity: high
     - objectDefinition:
@@ -92,6 +195,11 @@ spec:
                 kind: DataProtectionApplication
                 metadata:
                   namespace: open-cluster-management-backup
+          customMessage:
+            compliant: "The oadp.openshift.io.DataProtectionApplication resource exists in the open-cluster-management-backup namespace."
+            noncompliant: |-
+              The oadp.openshift.io.DataProtectionApplication resource does not exist in the open-cluster-management-backup namespace. 
+              You must create this resource to connect to the backup storage location.
           remediationAction: inform
           severity: high
     - objectDefinition:
@@ -109,6 +217,12 @@ spec:
                   namespace: open-cluster-management-backup
                 status:
                   phase: Available
+          customMessage:
+            compliant: "The velero.io.BackupStorageLocation resource exists in the open-cluster-management-backup namespace and the phase is Available."
+            noncompliant: |-
+              The velero.io.BackupStorageLocation resource with a phase Available does not exist in the open-cluster-management-backup namespace. 
+              This resource is created by the oadp.openshift.io.DataProtectionApplication resource, so verify that you have 
+              a DataProtectionApplication resource in the open-cluster-management-backup namespace that has valid content.
           remediationAction: inform
           severity: high 
     - objectDefinition:
@@ -126,6 +240,11 @@ spec:
                   labels:
                     velero.io/schedule-name: acm-validation-policy-schedule
                   namespace: open-cluster-management-backup
+          customMessage:
+            compliant: "The BackupSchedule resource is active and generating hub cluster backups at the specified storage location."
+            noncompliant: |-
+              There is no backup schedule actively running and generating hub cluster backups at the specified storage location.
+              Verify that you have a hub cluster connected to the specified storage location, with a BackupSchedule resource active and generating hub cluster backup.
           remediationAction: inform
           severity: high 
     - objectDefinition:
@@ -180,7 +299,10 @@ spec:
                 metadata:
                   namespace: open-cluster-management-backup
                 status:
-                  phase: InProgress                                                            
+                  phase: InProgress 
+          customMessage:
+            compliant: |- 
+              The Backup resource with an InProgress status does not exist. This template is useful to identify incomplete backups.                                                        
           remediationAction: inform
           severity: medium
     - objectDefinition:
@@ -197,7 +319,9 @@ spec:
                 metadata:
                   namespace: open-cluster-management-backup
                 status:
-                  phase: BackupCollision                                                           
+                  phase: BackupCollision
+          customMessage:
+            compliant: "The BackupSchedule resource with a BackupCollision status does not exist."
           remediationAction: inform
           severity: high   
     - objectDefinition:
@@ -246,7 +370,103 @@ spec:
                 metadata:
                   namespace: open-cluster-management-backup
                 status:
-                  phase: Error                                                       
+                  phase: Error
+          customMessage:
+            compliant: |-
+              The BackupSchedule resource with a status of Failed, FailedValidation or empty value does not exist.
+              The cluster.open-cluster-management.io.Restore resource with a status of Error or empty value also does not exist.                                                   
           remediationAction: inform
-          severity: high                                                                        
-  remediationAction: inform
+          severity: high
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: oadp-operator-exists
+        spec:
+          object-templates:
+            - complianceType: musthave
+              objectDefinition:
+                apiVersion: operators.coreos.com/v1alpha1
+                kind: Subscription
+                metadata:
+                  namespace: open-cluster-management-backup
+                spec:
+                  name: redhat-oadp-operator
+          customMessage:
+            noncompliant: |-
+              The redhat-oadp-operator subscription does not exist in the open-cluster-management-backup namespace.
+              If this hub cluster does not have the AWS Security Token Service (STS) option enabled,
+              OADP is installed by the MultiClusterHub resource when the cluster-backup option is set to true.
+              Check the multiclusterhub-operator pod for errors related to the OADP operator installation. 
+              For hub clusters where the STS option is enabled, you must manually install the OADP operator.
+          remediationAction: inform
+          severity: high
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: oadp-channel-validation
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates-raw: |
+            {{ printf `{{- $ch := "%s" }}` .Values.global.minOADPChannel }}
+            {{ `{{- range $ss := (lookup "operators.coreos.com/v1alpha1" "Subscription" "open-cluster-management-backup" "").items }}` }}
+              {{ `{{- if and (eq $ss.spec.name "redhat-oadp-operator") (lt $ss.spec.channel $ch) }}` }}
+              - complianceType: musthave
+                objectDefinition:
+                  kind: Subscription
+                  apiVersion: operators.coreos.com/v1alpha1
+                  metadata:
+                    name: {{ `{{ $ss.metadata.name }}` }}
+                    namespace: {{ `{{ $ss.metadata.namespace }}` }}
+                  spec:
+                    channel: {{ `{{ $ch }}` }}
+              {{ `{{- end }}` }}
+            {{ `{{- end }}` }}
+          customMessage:
+            compliant: |- 
+              The redhat-oadp-operator subscription installation does not exist in the open-cluster-management-backup namespace, 
+              or the installed version matches or exceeds the version set by the backup and restore operator Helm chart.
+            noncompliant: 
+              The version of the redhat-oadp-operator operator installed in the open-cluster-management-backup namespace 
+              is lower than the version set by the backup and restore operator Helm chart.
+    - objectDefinition:
+        apiVersion: policy.open-cluster-management.io/v1
+        kind: ConfigurationPolicy
+        metadata:
+          name: custom-oadp-channel-validation
+        spec:
+          remediationAction: inform
+          severity: high
+          object-templates-raw: |
+            {{ `{{- $ch := "" }}` }}
+            {{ `{{- range $ss := (lookup "operators.coreos.com/v1alpha1" "Subscription" "open-cluster-management-backup" "").items }}` }}
+              {{ `{{- if (eq $ss.spec.name "redhat-oadp-operator") }}` }}
+                {{ `{{ $ch = $ss.spec.channel }}` }}
+                {{ `{{- break }}` }}
+              {{ `{{- end }}` }}
+            {{ `{{- end }}` }}
+            {{ `{{- if $ch }}` }}
+              {{ `{{- range $cs := (lookup "operators.coreos.com/v1alpha1" "Subscription" "" "").items }}` }}
+                {{ `{{- if and (eq $cs.spec.name "redhat-oadp-operator") (ne $cs.spec.channel $ch) }}` }}
+                - complianceType: musthave
+                  objectDefinition:
+                    kind: Subscription
+                    apiVersion: operators.coreos.com/v1alpha1
+                    metadata:
+                      name: {{ `{{ $cs.metadata.name }}` }}
+                      namespace: {{ `{{ $cs.metadata.namespace }}` }}
+                    spec:
+                      channel: {{ `{{ $ch }}` }}
+                {{ `{{- end }}` }}
+              {{ `{{- end }}` }}
+            {{ `{{- end }}` }}
+          customMessage:
+            compliant: |- 
+              There is no redhat-oadp-operator subscription installed in a namespace other than the open-cluster-management-backup namespace,
+              or a redhat-oadp-operator subscription is installed and matches the version of the redhat-oadp-operator subscription installed within the open-cluster-management-backup namespace.
+            noncompliant: |-
+              There is a version of redhat-oadp-operator subscription installed in a namespace other than the open-cluster-management-backup namespace
+              and this version doesn't match the version set by the backup and restore operator Helm chart.
+              Alternatively, the version doesn't match the version of the redhat-oadp-operator subscription that is installed within the open-cluster-management-backup namespace.

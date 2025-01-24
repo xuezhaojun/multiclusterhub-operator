@@ -1,7 +1,20 @@
 # Copyright Contributors to the Open Cluster Management project
 
-# creates the OADP Operator namespace group
-# All operator resources will be installed under the open-cluster-management-backup namespace
+# Creates the OADP Operator namespace group, if the cluster is not STS enabled
+# For an STS enabled cluster, the chart creates a ConfigMap storing OADP settings
+# All resources will be installed under the open-cluster-management-backup namespace
+{{- if .Values.hubconfig.clusterSTSEnabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: acm-redhat-oadp-operator-group
+  namespace: open-cluster-management-backup
+  annotations:
+    "helm.sh/hook": pre-install
+    "helm.sh/hook-weight": "-2"
+data:
+  targetNamespaces: open-cluster-management-backup
+{{- else }}
 apiVersion: operators.coreos.com/v1
 kind: OperatorGroup
 metadata:
@@ -13,3 +26,4 @@ metadata:
 spec:
   targetNamespaces:
   - open-cluster-management-backup
+{{- end }}

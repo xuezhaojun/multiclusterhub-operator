@@ -16,39 +16,16 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 
-	apixv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/types"
-	apiregistrationv1 "k8s.io/kube-aggregator/pkg/apis/apiregistration/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 )
-
-func (r *MultiClusterHubReconciler) cleanupAPIServices(reqLogger logr.Logger, m *operatorsv1.MultiClusterHub) error {
-	err := r.Client.DeleteAllOf(
-		context.TODO(),
-		&apiregistrationv1.APIService{},
-		client.MatchingLabels{
-			"installer.name":      m.GetName(),
-			"installer.namespace": m.GetNamespace(),
-		},
-	)
-
-	if err != nil {
-		if errors.IsNotFound(err) {
-			reqLogger.Info("No matching API services to finalize. Continuing.")
-			return nil
-		}
-		reqLogger.Error(err, "Error while deleting API services")
-		return err
-	}
-
-	reqLogger.Info("API services finalized")
-	return nil
-}
 
 func (r *MultiClusterHubReconciler) cleanupClusterRoles(reqLogger logr.Logger, m *operatorsv1.MultiClusterHub) error {
 	err := r.Client.DeleteAllOf(context.TODO(), &rbacv1.ClusterRole{}, client.MatchingLabels{
@@ -87,62 +64,11 @@ func (r *MultiClusterHubReconciler) cleanupClusterRoleBindings(reqLogger logr.Lo
 	return nil
 }
 
-func (r *MultiClusterHubReconciler) cleanupPullSecret(reqLogger logr.Logger, m *operatorsv1.MultiClusterHub) error {
-	// TODO: Handle scenario where ImagePullSecret is changed after install
-	if m.Spec.ImagePullSecret == "" {
-		reqLogger.Info("No ImagePullSecret to cleanup. Continuing.")
-		return nil
-	}
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: utils.CertManagerNamespace,
-			Name:      m.Spec.ImagePullSecret,
-		},
-	}
-
-	err := r.Client.Delete(context.TODO(), secret)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			reqLogger.Info("No matching secret to finalize. Continuing.")
-			return nil
-		}
-		reqLogger.Error(err, "Error while deleting secret")
-		return err
-	}
-
-	reqLogger.Info(fmt.Sprintf("%s secret finalized", utils.CertManagerNS(m)))
-	return nil
-}
-
-func (r *MultiClusterHubReconciler) cleanupCRDs(log logr.Logger, m *operatorsv1.MultiClusterHub) error {
-	err := r.Client.DeleteAllOf(
-		context.TODO(),
-		&apixv1.CustomResourceDefinition{},
-		client.MatchingLabels{
-			"installer.name":      m.GetName(),
-			"installer.namespace": m.GetNamespace(),
-		},
-	)
-
-	if err != nil {
-		if errors.IsNotFound(err) {
-			log.Info("No matching CRDs to finalize. Continuing.")
-			return nil
-		}
-		log.Error(err, "Error while deleting CRDs")
-		return err
-	}
-
-	log.Info("CRDs finalized")
-	return nil
-}
-
 func (r *MultiClusterHubReconciler) cleanupMultiClusterEngine(log logr.Logger, m *operatorsv1.MultiClusterHub) error {
 	ctx := context.Background()
 
 	mce, err := multiclusterengine.GetManagedMCE(ctx, r.Client)
-	if err != nil {
+	if err != nil && !apimeta.IsNoMatchError(err) {
 		return err
 	}
 	if mce != nil && !multiclusterengine.MCECreatedByMCH(mce, m) {
@@ -174,13 +100,14 @@ func (r *MultiClusterHubReconciler) cleanupMultiClusterEngine(log logr.Logger, m
 
 	if mceSub != nil {
 		csv, err := r.GetCSVFromSubscription(mceSub)
+		namespace := multiclusterengine.OperandNamespace()
 		if err == nil { // CSV Exists
 			err = r.Client.Delete(ctx, csv)
 			if err != nil && !errors.IsNotFound(err) {
 				return err
 			}
 			err = r.Client.Get(ctx,
-				types.NamespacedName{Name: csv.GetName(), Namespace: utils.MCESubscriptionNamespace},
+				types.NamespacedName{Name: csv.GetName(), Namespace: namespace},
 				csv)
 			if err == nil {
 				return fmt.Errorf("CSV has not yet been terminated")
@@ -188,7 +115,7 @@ func (r *MultiClusterHubReconciler) cleanupMultiClusterEngine(log logr.Logger, m
 		}
 
 		err = r.Client.Get(ctx,
-			types.NamespacedName{Name: mceSub.Name, Namespace: mceSub.Namespace},
+			types.NamespacedName{Name: mceSub.Name, Namespace: namespace},
 			&subv1alpha1.Subscription{})
 		if err == nil {
 
@@ -219,9 +146,10 @@ func (r *MultiClusterHubReconciler) cleanupMultiClusterEngine(log logr.Logger, m
 		r.Log.Info("MCE shares namespace with MCH; skipping namespace termination")
 	}
 
+	log.Info("MultiClusterEngine finalized")
 	return nil
 }
-func (r *MultiClusterHubReconciler) cleanupNamespaces(reqLogger logr.Logger) error {
+func (r *MultiClusterHubReconciler) cleanupNamespaces(reqLogger logr.Logger, m *operatorsv1.MultiClusterHub) error {
 	ctx := context.Background()
 	clusterBackupNamespace := &corev1.Namespace{}
 	err := r.Client.Get(ctx, types.NamespacedName{Name: utils.ClusterSubscriptionNamespace}, clusterBackupNamespace)
@@ -316,30 +244,27 @@ func (r *MultiClusterHubReconciler) cleanupAppSubscriptions(reqLogger logr.Logge
 		reqLogger.Info("Waiting for helmreleases to be terminated")
 		waiting := NewHubCondition(operatorsv1.Progressing, metav1.ConditionTrue, HelmReleaseTerminatingReason, "Waiting for helmreleases to terminate.")
 		SetHubCondition(&m.Status, *waiting)
-		return fmt.Errorf("Waiting for helmreleases to be terminated")
+		return fmt.Errorf("waiting for helmreleases to be terminated")
 	}
 
 	reqLogger.Info("All helmreleases have been terminated")
 	return nil
 }
 
-func (r *MultiClusterHubReconciler) cleanupFoundation(reqLogger logr.Logger, m *operatorsv1.MultiClusterHub) error {
-
-	reqLogger.Info("All foundation artefacts have been terminated")
-
-	return nil
-}
-
-func (r *MultiClusterHubReconciler) orphanOwnedMultiClusterEngine(m *operatorsv1.MultiClusterHub) error {
+func (r *MultiClusterHubReconciler) orphanOwnedMultiClusterEngine(reqLogger logr.Logger, m *operatorsv1.MultiClusterHub) error {
 	ctx := context.Background()
 
 	mce, err := multiclusterengine.GetManagedMCE(ctx, r.Client)
-	if err != nil {
-		return err
-	}
 	if mce == nil {
 		// MCE does not exist
 		return nil
+	}
+	if err != nil {
+		if apimeta.IsNoMatchError(err) {
+			// MCE does not exist
+			return nil
+		}
+		return err
 	}
 
 	r.Log.Info("Preexisting MCE exists, orphaning resource")

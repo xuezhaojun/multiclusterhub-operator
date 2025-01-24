@@ -40,6 +40,117 @@ func TestIsPaused(t *testing.T) {
 
 }
 
+func TestGetHubSize(t *testing.T) {
+	tests := []struct {
+		name string
+		mce  *operatorsv1.MultiClusterHub
+		want operatorsv1.HubSize
+	}{
+		{
+			name: "get default",
+			mce:  &operatorsv1.MultiClusterHub{},
+			want: operatorsv1.Small,
+		},
+		{
+			name: "set hubsize Small",
+			mce: &operatorsv1.MultiClusterHub{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationHubSize: "Small",
+					},
+				},
+			},
+			want: operatorsv1.Small,
+		},
+		{
+			name: "set hubsize Medium",
+			mce: &operatorsv1.MultiClusterHub{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationHubSize: "Medium",
+					},
+				},
+			},
+			want: operatorsv1.Medium,
+		},
+		{
+			name: "set hubsize Large",
+			mce: &operatorsv1.MultiClusterHub{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationHubSize: "Large",
+					},
+				},
+			},
+			want: operatorsv1.Large,
+		},
+		{
+			name: "set hubsize XLarge",
+			mce: &operatorsv1.MultiClusterHub{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						AnnotationHubSize: "XLarge",
+					},
+				},
+			},
+			want: operatorsv1.XLarge,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := GetHubSize(tt.mce); got != tt.want {
+				t.Errorf("GetHubSize() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_AnnotationMatch(t *testing.T) {
+	tests := []struct {
+		name string
+		new  map[string]string
+		old  map[string]string
+		want bool
+	}{
+		{
+			name: "Annotations should match",
+			new: map[string]string{
+				AnnotationMCHPause:         "false",
+				AnnotationImageRepo:        "sample-image-repo",
+				AnnotationImageOverridesCM: "sample-image-override",
+			},
+			old: map[string]string{
+				DeprecatedAnnotationMCHPause:         "false",
+				DeprecatedAnnotationImageRepo:        "sample-image-repo",
+				DeprecatedAnnotationImageOverridesCM: "sample-image-override",
+			},
+			want: true,
+		},
+		{
+			name: "Annotations should not match",
+			new: map[string]string{
+				AnnotationMCHPause:         "false",
+				AnnotationImageRepo:        "sample-image-repo",
+				AnnotationImageOverridesCM: "sample-image-override",
+			},
+			old: map[string]string{
+				DeprecatedAnnotationMCHPause:         "true",
+				DeprecatedAnnotationImageRepo:        "sample-image-repo",
+				DeprecatedAnnotationImageOverridesCM: "sample-image-override",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AnnotationsMatch(tt.old, tt.new); got != tt.want {
+				t.Errorf("AnnotationsMatch(old, new) = got: %v, want: %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func Test_getAnnotation(t *testing.T) {
 	type args struct {
 		instance *operatorsv1.MultiClusterHub
@@ -76,6 +187,48 @@ func Test_getAnnotation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func Test_GetImageRepository(t *testing.T) {
+	t.Run("Get image repository for MCH", func(t *testing.T) {
+		mch := &operatorsv1.MultiClusterHub{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				AnnotationImageRepo: "quay.io/foo",
+			}},
+		}
+		want := "quay.io/foo"
+		if got := GetImageRepository(mch); got != want {
+			t.Errorf("GetImageRepository(mch) = %v, want %v", got, want)
+		}
+	})
+}
+
+func Test_GetImageOverridesConfigmapName(t *testing.T) {
+	t.Run("Get image overrides configmap name for MCH", func(t *testing.T) {
+		mch := &operatorsv1.MultiClusterHub{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				AnnotationImageOverridesCM: "image-override-cm",
+			}},
+		}
+		want := "image-override-cm"
+		if got := GetImageOverridesConfigmapName(mch); got != want {
+			t.Errorf("AnnotationImageOverridesCM(mch) = %v, want %v", got, want)
+		}
+	})
+}
+
+func Test_GetTemplateOverridesConfigmapName(t *testing.T) {
+	t.Run("Get template overrides configmap name for MCH", func(t *testing.T) {
+		mch := &operatorsv1.MultiClusterHub{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				AnnotationTemplateOverridesCM: "template-override-cm",
+			}},
+		}
+		want := "template-override-cm"
+		if got := GetTemplateOverridesConfigmapName(mch); got != want {
+			t.Errorf("GetTemplateOverridesConfigmapName() = %v, want %v", got, want)
+		}
+	})
 }
 
 func TestOverrideImageRepository(t *testing.T) {
@@ -122,6 +275,34 @@ func TestOverrideImageRepository(t *testing.T) {
 			t.Fatalf("ImageRepository override failure")
 		}
 	}
+}
+
+func Test_GetMCEAnnotationOverrides(t *testing.T) {
+	t.Run("Get MCE annotation overrides for MCH", func(t *testing.T) {
+		mch := &operatorsv1.MultiClusterHub{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				AnnotationMCESubscriptionSpec: "mce-sub",
+			}},
+		}
+		want := "mce-sub"
+		if got := GetMCEAnnotationOverrides(mch); got != want {
+			t.Errorf("GetMCEAnnotationOverrides(mch) = %v, want %v", got, want)
+		}
+	})
+}
+
+func Test_GetOADPAnnotationOverrides(t *testing.T) {
+	t.Run("Get OADP annotation overrides for MCH", func(t *testing.T) {
+		mch := &operatorsv1.MultiClusterHub{
+			ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				AnnotationOADPSubscriptionSpec: "odap-sub",
+			}},
+		}
+		want := "odap-sub"
+		if got := GetOADPAnnotationOverrides(mch); got != want {
+			t.Errorf("GetOADPAnnotationOverrides(mch) = %v, want %v", got, want)
+		}
+	})
 }
 
 func TestShouldIgnoreOCPVersion(t *testing.T) {

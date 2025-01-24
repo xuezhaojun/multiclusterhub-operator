@@ -5,14 +5,12 @@ package controllers
 
 import (
 	"context"
-	"fmt"
+	"reflect"
 
 	operatorsv1 "github.com/stolostron/multiclusterhub-operator/api/v1"
 	utils "github.com/stolostron/multiclusterhub-operator/pkg/utils"
-	"github.com/stolostron/multiclusterhub-operator/pkg/version"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -30,45 +28,19 @@ const (
 	AnnotationNodeSelector = "open-cluster-management/nodeSelector"
 )
 
-func getInstallerLabels(m *operatorsv1.MultiClusterHub) map[string]string {
-	labels := make(map[string]string)
-	labels["installer.name"] = m.GetName()
-	labels["installer.namespace"] = m.GetNamespace()
-	return labels
-}
+func getKlusterletAddonConfig(m *operatorsv1.MultiClusterHub) *unstructured.Unstructured {
+	grcEnabled := true
 
-func getHubNamespace() *corev1.Namespace {
-	ns := &corev1.Namespace{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: ManagedClusterName,
-		},
+	if m.Spec.Overrides != nil {
+		for _, component := range m.Spec.Overrides.Components {
+			if component.Name == operatorsv1.GRC {
+				grcEnabled = component.Enabled
+
+				break
+			}
+		}
 	}
-	return ns
-}
 
-func getManagedCluster() *unstructured.Unstructured {
-	managedCluster := &unstructured.Unstructured{
-		Object: map[string]interface{}{
-			"apiVersion": "cluster.open-cluster-management.io/v1",
-			"kind":       "ManagedCluster",
-			"metadata": map[string]interface{}{
-				"name": ManagedClusterName,
-				"labels": map[string]interface{}{
-					"local-cluster":                 "true",
-					"cloud":                         "auto-detect",
-					"vendor":                        "auto-detect",
-					"velero.io/exclude-from-backup": "true",
-				},
-			},
-			"spec": map[string]interface{}{
-				"hubAcceptsClient": true,
-			},
-		},
-	}
-	return managedCluster
-}
-
-func getKlusterletAddonConfig() *unstructured.Unstructured {
 	klusterletaddonconfig := &unstructured.Unstructured{
 		Object: map[string]interface{}{
 			"apiVersion": "agent.open-cluster-management.io/v1",
@@ -78,96 +50,110 @@ func getKlusterletAddonConfig() *unstructured.Unstructured {
 				"namespace": ManagedClusterName,
 			},
 			"spec": map[string]interface{}{
-				"clusterName":      KlusterletAddonConfigName,
-				"clusterNamespace": ManagedClusterName,
 				"applicationManager": map[string]interface{}{
 					"enabled": true,
 				},
-				"clusterLabels": map[string]interface{}{
-					"cloud":  "auto-detect",
-					"vendor": "auto-detect",
-				},
-				"connectionManager": map[string]interface{}{
-					"enabledGlobalView": false,
+				"certPolicyController": map[string]interface{}{
+					"enabled": grcEnabled,
 				},
 				"policyController": map[string]interface{}{
-					"enabled": true,
-				},
-				"prometheusIntegration": map[string]interface{}{
-					"enabled": true,
+					"enabled": grcEnabled,
 				},
 				"searchCollector": map[string]interface{}{
 					"enabled": false,
 				},
-				"certPolicyController": map[string]interface{}{
-					"enabled": true,
-				},
-				"iamPolicyController": map[string]interface{}{
-					"enabled": true,
-				},
-				"version": version.Version,
 			},
 		},
 	}
 	return klusterletaddonconfig
 }
 
+func equivalentKlusterletAddonConfig(desiredKlusterletaddonconfig, klusterletaddonconfig *unstructured.Unstructured,
+	m *operatorsv1.MultiClusterHub,
+) (bool, map[string]interface{}, error) {
+	newSpec, _, err := unstructured.NestedMap(desiredKlusterletaddonconfig.Object, "spec")
+	if err != nil {
+		return false, nil, err
+	}
+
+	currentSpec, _, err := unstructured.NestedMap(klusterletaddonconfig.Object, "spec")
+	if err != nil {
+		return false, nil, err
+	}
+
+	labels := klusterletaddonconfig.GetLabels()
+
+	hasLabels := labels["installer.name"] == m.Name && labels["installer.namespace"] == m.Namespace
+
+	return reflect.DeepEqual(newSpec, currentSpec) && hasLabels, newSpec, nil
+}
+
 func (r *MultiClusterHubReconciler) ensureKlusterletAddonConfig(m *operatorsv1.MultiClusterHub) (ctrl.Result, error) {
-	klusterletaddonconfig := getKlusterletAddonConfig()
+	ctx := context.Background()
 
-	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: KlusterletAddonConfigName, Namespace: ManagedClusterName}, klusterletaddonconfig)
+	r.Log.Info("Checking for local-cluster namespace")
+	ns := &corev1.Namespace{}
+	err := r.Client.Get(ctx, types.NamespacedName{Name: ManagedClusterName}, ns)
 	if err != nil && errors.IsNotFound(err) {
-		// Creating new klusterletAddonConfig
-		newKlusterletaddonconfig := getKlusterletAddonConfig()
-		utils.AddInstallerLabel(newKlusterletaddonconfig, m.GetName(), m.GetNamespace())
+		r.Log.Info("Waiting for local-cluster namespace to be created")
+		return ctrl.Result{RequeueAfter: resyncPeriod}, nil
+	} else if err != nil {
+		r.Log.Error(err, "Failed to check for local-cluster namespace")
+		return ctrl.Result{}, err
+	}
 
-		err = r.Client.Create(context.TODO(), newKlusterletaddonconfig)
-		if err != nil {
-			r.Log.Error(err, "Failed to create klusterletaddonconfig resource")
-			return ctrl.Result{}, err
+	desiredKlusterletaddonconfig := getKlusterletAddonConfig(m)
+	klusterletaddonconfig := desiredKlusterletaddonconfig.DeepCopy()
+	nsn := types.NamespacedName{
+		Name:      KlusterletAddonConfigName,
+		Namespace: ManagedClusterName,
+	}
+
+	err = r.Client.Get(ctx, nsn, klusterletaddonconfig)
+	if err != nil {
+		if errors.IsNotFound(err) {
+			// Creating new klusterletAddonConfig
+			utils.AddInstallerLabel(desiredKlusterletaddonconfig, m.GetName(), m.GetNamespace())
+
+			err = r.Client.Create(ctx, desiredKlusterletaddonconfig)
+			if err != nil {
+				r.Log.Error(err, "Failed to create klusterletaddonconfig resource")
+				return ctrl.Result{}, err
+			}
+			// KlusterletAddonConfig was successful
+			r.Log.Info("Created a new KlusterletAddonConfig")
+			return ctrl.Result{}, nil
 		}
-		// KlusterletAddonConfig was successful
-		r.Log.Info("Created a new KlusterletAddonConfig")
+
+		r.Log.Error(err, "Failed to get klusterletaddonconfig resource")
+		return ctrl.Result{}, err
+	}
+
+	isEquivalent, newSpec, err := equivalentKlusterletAddonConfig(desiredKlusterletaddonconfig, klusterletaddonconfig, m)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Don't need to update klusterletaddonconfig when isEquivalent is true
+	if isEquivalent {
 		return ctrl.Result{}, nil
 	}
 
 	utils.AddInstallerLabel(klusterletaddonconfig, m.GetName(), m.GetNamespace())
 
-	err = r.Client.Update(context.TODO(), klusterletaddonconfig)
+	err = unstructured.SetNestedMap(klusterletaddonconfig.Object, newSpec, "spec")
+	if err != nil {
+		r.Log.Error(err, "Failed to set the spec of the KlusterletAddonConfig")
+		return ctrl.Result{}, err
+	}
+
+	err = r.Client.Update(ctx, klusterletaddonconfig)
 	if err != nil {
 		r.Log.Error(err, "Failed to update klusterletaddonconfig resource")
 		return ctrl.Result{}, err
 	}
 
+	r.Log.Info("Updated the KlusterletAddonConfig")
+
 	return ctrl.Result{}, nil
-}
-
-func (r *MultiClusterHubReconciler) ensureManagedClusterIsRunning(m *operatorsv1.MultiClusterHub, ocpConsole bool) ([]interface{}, error) {
-	if m.Spec.DisableHubSelfManagement {
-		return nil, nil
-	}
-	if !r.ComponentsAreRunning(m, ocpConsole) {
-		r.Log.Info("Waiting for mch phase to be 'running' before ensuring hub is running")
-		return nil, fmt.Errorf("Waiting for mch phase to be 'running' before ensuring hub is running")
-	}
-
-	managedCluster := getManagedCluster()
-	err := r.Client.Get(context.TODO(), types.NamespacedName{Name: ManagedClusterName}, managedCluster)
-	if err != nil {
-		r.Log.Info("Failed to find managedcluster resource")
-		return nil, err
-	}
-
-	status, ok := managedCluster.Object["status"].(map[string]interface{})
-	if !ok {
-		r.Log.Info("Managedcluster status is not present")
-		return nil, fmt.Errorf("Managedcluster status is not present")
-	}
-	conditions, ok := status["conditions"].([]interface{})
-	if !ok {
-		r.Log.Info("Managedcluster status conditions are not present")
-		return nil, fmt.Errorf("Managedcluster status conditions are not present")
-	}
-
-	return conditions, nil
 }
