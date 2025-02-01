@@ -2,10 +2,8 @@
 package renderer
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path"
 	"path/filepath"
@@ -22,7 +20,7 @@ import (
 	"helm.sh/helm/v3/pkg/engine"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"sigs.k8s.io/controller-runtime/pkg/log"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/yaml"
 )
 
@@ -34,18 +32,26 @@ type Values struct {
 
 type Global struct {
 	ImageOverrides      map[string]string    `json:"imageOverrides" structs:"imageOverrides"`
+	TemplateOverrides   map[string]string    `json:"templateOverrides" structs:"templateOverrides"`
 	PullPolicy          string               `json:"pullPolicy" structs:"pullPolicy"`
 	PullSecret          string               `json:"pullSecret" structs:"pullSecret"`
 	Namespace           string               `json:"namespace" structs:"namespace"`
 	ImageRepository     string               `json:"imageRepository" structs:"namespace"`
 	Name                string               `json:"name" structs:"name"`
 	Channel             string               `json:"channel" structs:"Channel"`
+	MinOADPChannel      string               `json:"minOADPChannel" structs:"minOADPChannel"`
 	InstallPlanApproval subv1alpha1.Approval `json:"installPlanApproval" structs:"installPlanApproval"`
 	Source              string               `json:"source" structs:"source"`
 	SourceNamespace     string               `json:"sourceNamespace" structs:"sourceNamespace"`
+	HubSize             v1.HubSize           `json:"hubSize" structs:"hubSize" yaml:"hubSize"`
+	APIUrl              string               `json:"apiUrl" structs:"apiUrl"`
+	Target              string               `json:"target" structs:"target"`
+	BaseDomain          string               `json:"baseDomain" structs:"baseDomain"`
+	DeployOnOCP         bool                 `json:"deployOnOCP" structs:"deployOnOCP"`
 }
 
 type HubConfig struct {
+	ClusterSTSEnabled bool              `json:"clusterSTSEnabled" structs:"clusterSTSEnabled"`
 	NodeSelector      map[string]string `json:"nodeSelector" structs:"nodeSelector"`
 	ProxyConfigs      map[string]string `json:"proxyConfigs" structs:"proxyConfigs"`
 	ReplicaCount      int               `json:"replicaCount" structs:"replicaCount"`
@@ -63,6 +69,17 @@ type Toleration struct {
 	Effect            corev1.TaintEffect        `json:"Effect" protobuf:"bytes,4,opt,name=effect,casttype=TaintEffect"`
 	TolerationSeconds *int64                    `json:"TolerationSeconds" protobuf:"varint,5,opt,name=tolerationSeconds"`
 }
+
+// defaults for the OADP subscription that will be created by the installer
+const (
+	defaultOADPChannel         = "stable-1.4" // This will also be the minOADPChannel (min version we expect to be installed)
+	defaultOADPName            = "redhat-oadp-operator"
+	defaultOADPInstallPlan     = "Automatic"
+	defaultOADPSource          = "redhat-operators"
+	defaultOADPSourceNamespace = "openshift-marketplace"
+)
+
+var log = logf.Log.WithName("reconcile")
 
 func convertTolerations(tols []corev1.Toleration) []Toleration {
 	var tolerations []Toleration
@@ -152,7 +169,7 @@ func (val *Values) ToValues() (chartutil.Values, error) {
 
 }
 
-func RenderCRDs(crdDir string) ([]*unstructured.Unstructured, []error) {
+func RenderCRDs(crdDir string, mch *v1.MultiClusterHub) ([]*unstructured.Unstructured, []error) {
 	var crds []*unstructured.Unstructured
 	errs := []error{}
 
@@ -167,12 +184,19 @@ func RenderCRDs(crdDir string) ([]*unstructured.Unstructured, []error) {
 			return nil
 		}
 
-		bytesFile, e := ioutil.ReadFile(filepath.Clean(path))
+		bytesFile, e := os.ReadFile(filepath.Clean(path))
 		if e != nil {
-			errs = append(errs, fmt.Errorf("%s - error reading file: %v", info.Name(), err.Error()))
+			errs = append(errs, fmt.Errorf("%s - error reading file: %v", info.Name(), err))
 		}
+
 		if err = yaml.Unmarshal(bytesFile, crd); err != nil {
 			errs = append(errs, fmt.Errorf("%s - error unmarshalling file to unstructured: %v", info.Name(), err.Error()))
+		}
+		if mch != nil {
+			_, conversion, _ := unstructured.NestedMap(crd.Object, "spec", "conversion", "webhook", "clientConfig", "service")
+			if conversion {
+				crd.Object["spec"].(map[string]interface{})["conversion"].(map[string]interface{})["webhook"].(map[string]interface{})["clientConfig"].(map[string]interface{})["service"].(map[string]interface{})["namespace"] = mch.Namespace
+			}
 		}
 		crds = append(crds, crd)
 		return nil
@@ -184,23 +208,27 @@ func RenderCRDs(crdDir string) ([]*unstructured.Unstructured, []error) {
 	return crds, errs
 }
 
-func RenderCharts(chartDir string, mch *v1.MultiClusterHub, images map[string]string) ([]*unstructured.Unstructured, []error) {
-	log := log.FromContext(context.Background())
+func RenderCharts(chartDir string, mch *v1.MultiClusterHub, images map[string]string, tpl map[string]string,
+	isSTSEnabled bool) ([]*unstructured.Unstructured, []error) {
+
 	var templates []*unstructured.Unstructured
 	errs := []error{}
+
 	if val, ok := os.LookupEnv("DIRECTORY_OVERRIDE"); ok {
 		chartDir = path.Join(val, chartDir)
 	} else {
 		value, _ := os.LookupEnv("TEMPLATES_PATH")
 		chartDir = path.Join(value, chartDir)
 	}
-	charts, err := ioutil.ReadDir(chartDir)
+
+	charts, err := os.ReadDir(chartDir)
 	if err != nil {
 		errs = append(errs, err)
 	}
+
 	for _, chart := range charts {
 		chartPath := filepath.Join(chartDir, chart.Name())
-		chartTemplates, errs := renderTemplates(chartPath, mch, images)
+		chartTemplates, errs := renderTemplates(chartPath, mch, images, tpl, isSTSEnabled)
 		if len(errs) > 0 {
 			for _, err := range errs {
 				log.Info(err.Error())
@@ -212,9 +240,9 @@ func RenderCharts(chartDir string, mch *v1.MultiClusterHub, images map[string]st
 	return templates, nil
 }
 
-func RenderChart(chartPath string, mch *v1.MultiClusterHub, images map[string]string) ([]*unstructured.Unstructured, []error) {
-	log := log.FromContext(context.Background())
-	errs := []error{}
+func RenderChart(chartPath string, mch *v1.MultiClusterHub, images map[string]string, templates map[string]string,
+	isSTSEnabled bool) ([]*unstructured.Unstructured, []error) {
+
 	if val, ok := os.LookupEnv("DIRECTORY_OVERRIDE"); ok {
 		chartPath = path.Join(val, chartPath)
 	} else {
@@ -222,7 +250,8 @@ func RenderChart(chartPath string, mch *v1.MultiClusterHub, images map[string]st
 		chartPath = path.Join(value, chartPath)
 
 	}
-	chartTemplates, errs := renderTemplates(chartPath, mch, images)
+
+	chartTemplates, errs := renderTemplates(chartPath, mch, images, templates, isSTSEnabled)
 	if len(errs) > 0 {
 		for _, err := range errs {
 			log.Info(err.Error())
@@ -233,17 +262,20 @@ func RenderChart(chartPath string, mch *v1.MultiClusterHub, images map[string]st
 
 }
 
-func renderTemplates(chartPath string, mch *v1.MultiClusterHub, images map[string]string) ([]*unstructured.Unstructured, []error) {
-	log := log.FromContext(context.Background())
+func renderTemplates(chartPath string, mch *v1.MultiClusterHub, images map[string]string, tpl map[string]string,
+	isSTSEnabled bool) ([]*unstructured.Unstructured, []error) {
+
 	var templates []*unstructured.Unstructured
 	errs := []error{}
+
 	chart, err := loader.Load(chartPath)
 	if err != nil {
-		log.Info(fmt.Sprintf("error loading chart:"))
+		log.Info("error loading chart")
 		return nil, append(errs, err)
 	}
+
 	valuesYaml := &Values{}
-	injectValuesOverrides(valuesYaml, mch, images)
+	injectValuesOverrides(valuesYaml, mch, images, tpl, isSTSEnabled)
 	helmEngine := engine.Engine{
 		Strict:   true,
 		LintMode: false,
@@ -264,7 +296,7 @@ func renderTemplates(chartPath string, mch *v1.MultiClusterHub, images map[strin
 	for fileName, templateFile := range rawTemplates {
 		unstructured := &unstructured.Unstructured{}
 		if err = yaml.Unmarshal([]byte(templateFile), unstructured); err != nil {
-			return nil, append(errs, fmt.Errorf("error converting file %s to unstructured", fileName))
+			return nil, append(errs, fmt.Errorf("error converting file %s to unstructured: %v", fileName, err))
 		}
 
 		// Add namespace to namespaced resources
@@ -281,9 +313,12 @@ func renderTemplates(chartPath string, mch *v1.MultiClusterHub, images map[strin
 	return templates, errs
 }
 
-func injectValuesOverrides(values *Values, mch *v1.MultiClusterHub, images map[string]string) {
+func injectValuesOverrides(values *Values, mch *v1.MultiClusterHub, images map[string]string,
+	templates map[string]string, isSTSEnabled bool) {
 
 	values.Global.ImageOverrides = images
+
+	values.Global.TemplateOverrides = templates
 
 	values.Global.PullPolicy = string(utils.GetImagePullPolicy(mch))
 
@@ -292,6 +327,16 @@ func injectValuesOverrides(values *Values, mch *v1.MultiClusterHub, images map[s
 	values.Global.PullSecret = mch.Spec.ImagePullSecret
 
 	values.Global.ImageRepository = utils.GetImageRepository(mch)
+
+	// TODO: put this back later
+	// values.Global.HubSize = mch.Spec.HubSize
+
+	// TODO: remove this when mch.Spec.HubSize is valid again
+	values.Global.HubSize = utils.GetHubSize(mch)
+
+	values.Global.DeployOnOCP = true
+
+	values.HubConfig.ClusterSTSEnabled = isSTSEnabled
 
 	values.HubConfig.ReplicaCount = utils.DefaultReplicaCount(mch)
 
@@ -304,6 +349,12 @@ func injectValuesOverrides(values *Values, mch *v1.MultiClusterHub, images map[s
 	values.HubConfig.HubVersion = version.Version
 
 	values.HubConfig.OCPIngress = os.Getenv("INGRESS_DOMAIN")
+
+	values.Global.BaseDomain = os.Getenv("INGRESS_DOMAIN")
+
+	values.Global.APIUrl = os.Getenv("API_URL")
+
+	values.Global.Target = "acm"
 
 	values.HubConfig.SubscriptionPause = utils.GetDisableClusterImageSets(mch)
 
@@ -319,14 +370,16 @@ func injectValuesOverrides(values *Values, mch *v1.MultiClusterHub, images map[s
 
 	values.Global.Name, values.Global.Channel, values.Global.InstallPlanApproval, values.Global.Source, values.Global.SourceNamespace = GetOADPConfig(mch)
 
+	values.Global.MinOADPChannel = defaultOADPChannel
+
 	// TODO: Define all overrides
 }
 
 func GetOADPConfig(m *v1.MultiClusterHub) (string, string, subv1alpha1.Approval, string, string) {
-	log := log.FromContext(context.Background())
 	sub := &subv1alpha1.SubscriptionSpec{}
 	var name, channel, source, sourceNamespace string
 	var installPlan subv1alpha1.Approval
+
 	if oadpSpec := utils.GetOADPAnnotationOverrides(m); oadpSpec != "" {
 
 		err := json.Unmarshal([]byte(oadpSpec), sub)
@@ -339,32 +392,31 @@ func GetOADPConfig(m *v1.MultiClusterHub) (string, string, subv1alpha1.Approval,
 	if sub.Package != "" {
 		name = sub.Package
 	} else {
-		name = "redhat-oadp-operator"
+		name = defaultOADPName
 	}
 
 	if sub.Channel != "" {
 		channel = sub.Channel
 	} else {
-		channel = "stable-1.1"
+		channel = defaultOADPChannel
 	}
 
 	if sub.InstallPlanApproval != "" {
 		installPlan = sub.InstallPlanApproval
 	} else {
-		installPlan = "Automatic"
+		installPlan = defaultOADPInstallPlan
 	}
 
 	if sub.CatalogSource != "" {
 		source = sub.CatalogSource
 	} else {
-		source = "redhat-operators"
+		source = defaultOADPSource
 	}
 
 	if sub.CatalogSourceNamespace != "" {
 		sourceNamespace = sub.CatalogSourceNamespace
 	} else {
-		sourceNamespace = "openshift-marketplace"
+		sourceNamespace = defaultOADPSourceNamespace
 	}
 	return name, channel, installPlan, source, sourceNamespace
-
 }

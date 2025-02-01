@@ -6,7 +6,7 @@ package renderer
 import (
 
 	// "reflect"
-	"fmt"
+
 	"os"
 	"reflect"
 	"testing"
@@ -32,12 +32,16 @@ var chartPaths = []string{
 	utils.GRCChartLocation,
 	utils.ConsoleChartLocation,
 	utils.VolsyncChartLocation,
+	utils.FlightControlChartLocation,
 }
 
 func TestRender(t *testing.T) {
 
 	proxyList := []string{"insights-client"}
-	mchNodeSelector := map[string]string{"select": "test"}
+	mchNodeSelector := map[string]string{
+		"select":  "test",
+		"select2": "test2",
+	}
 	mchImagePullSecret := "test"
 	mchNamespace := "default"
 	mchTolerations := []corev1.Toleration{
@@ -91,14 +95,17 @@ func TestRender(t *testing.T) {
 	os.Setenv("HTTPS_PROXY", "test2")
 	os.Setenv("NO_PROXY", "test3")
 	os.Setenv("DIRECTORY_OVERRIDE", "../templates")
+	os.Setenv("ACM_HUB_OCP_VERSION", "4.10.0")
 
 	testImages := map[string]string{}
 	for _, v := range utils.GetTestImages() {
 		testImages[v] = "quay.io/test/test:Test"
 	}
+	templateOverrides := map[string]string{}
+
 	// multiple charts
 	chartsDir := chartsDir
-	templates, errs := RenderCharts(chartsDir, testMCH, testImages)
+	templates, errs := RenderCharts(chartsDir, testMCH, testImages, templateOverrides, false)
 	if len(errs) > 0 {
 		for _, err := range errs {
 			t.Logf(err.Error())
@@ -173,7 +180,7 @@ func TestRender(t *testing.T) {
 
 	for _, chartsPath := range chartPaths {
 		chartsPath := chartsPath
-		singleChartTemplates, errs := RenderChart(chartsPath, testMCH, singleChartTestImages)
+		singleChartTemplates, errs := RenderChart(chartsPath, testMCH, singleChartTestImages, templateOverrides, false)
 		if len(errs) > 0 {
 			for _, err := range errs {
 				t.Logf(err.Error())
@@ -245,6 +252,7 @@ func TestRender(t *testing.T) {
 	os.Unsetenv("NO_PROXY")
 	os.Unsetenv("POD_NAMESPACE")
 	os.Unsetenv("DIRECTORY_OVERRIDE")
+	os.Unsetenv("ACM_HUB_OCP_VERSION")
 
 }
 
@@ -260,10 +268,18 @@ func TestRenderCRDs(t *testing.T) {
 			crdDir: crdsDir,
 		},
 	}
+	mchNamespace := "default"
+	testMCH := &v1.MultiClusterHub{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "testmch",
+			Namespace: mchNamespace,
+		},
+		Spec: v1.MultiClusterHubSpec{},
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, errs := RenderCRDs(tt.crdDir)
-			if errs != nil && len(errs) > 1 {
+			got, errs := RenderCRDs(tt.crdDir, testMCH)
+			if len(errs) > 1 {
 				t.Errorf("RenderCRDs() got = %v, want %v", errs, nil)
 			}
 
@@ -282,7 +298,7 @@ func TestRenderCRDs(t *testing.T) {
 	}
 
 	os.Setenv("CRD_OVERRIDE", "pkg/doesnotexist")
-	_, errs := RenderCRDs(crdsDir)
+	_, errs := RenderCRDs(crdsDir, testMCH)
 	if errs == nil {
 		t.Fatalf("Should have received an error")
 	}
@@ -304,23 +320,23 @@ func TestOADPAnnotation(t *testing.T) {
 	test1, test2, test3, test4, test5 := GetOADPConfig(mch)
 
 	if test1 != "redhat-oadp-operator2" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for name"))
+		t.Error("Cluster Backup missing OADP overrides for name")
 	}
 
 	if test2 != "stable-1.0" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for channel"))
+		t.Error("Cluster Backup missing OADP overrides for channel")
 	}
 
 	if test3 != "Manual" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for install plan"))
+		t.Error("Cluster Backup missing OADP overrides for install plan")
 	}
 
 	if test4 != "redhat-operators2" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for source"))
+		t.Error("Cluster Backup missing OADP overrides for source")
 	}
 
 	if test5 != "openshift-marketplace2" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for source namespace"))
+		t.Error("Cluster Backup missing OADP overrides for source namespace")
 	}
 
 	mch = &v1.MultiClusterHub{
@@ -329,34 +345,26 @@ func TestOADPAnnotation(t *testing.T) {
 		},
 	}
 
+	// These should all be the defaults (no overrides)
 	test1, test2, test3, test4, test5 = GetOADPConfig(mch)
 
-	if test1 != "redhat-oadp-operator" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for name"))
+	if test1 != defaultOADPName {
+		t.Error("Cluster Backup missing OADP overrides for name")
 	}
 
-	if test2 != "stable-1.1" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for channel"))
+	if test2 != defaultOADPChannel {
+		t.Error("Cluster Backup missing OADP overrides for channel")
 	}
 
-	if test3 != "Automatic" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for install plan"))
+	if test3 != defaultOADPInstallPlan {
+		t.Error("Cluster Backup missing OADP overrides for install plan")
 	}
 
-	if test4 != "redhat-operators" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for source"))
+	if test4 != defaultOADPSource {
+		t.Error("Cluster Backup missing OADP overrides for source")
 	}
 
-	if test5 != "openshift-marketplace" {
-		t.Error(fmt.Sprintf("Cluster Backup missing OADP overrides for source namespace"))
+	if test5 != defaultOADPSourceNamespace {
+		t.Error("Cluster Backup missing OADP overrides for source namespace")
 	}
 }
-
-// func testFailures(t *testing.T) {
-// os.Setenv("CRD_OVERRIDE", "pkg/doesnotexist")
-// _, errs := RenderCRDs(crdsDir)
-// if errs == nil {
-// 	t.Fatalf("Should have received an error")
-// }
-// os.Unsetenv("CRD_OVERRIDE")
-// }

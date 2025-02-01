@@ -4,6 +4,7 @@
 package controllers
 
 import (
+	"context"
 	"encoding/json"
 	"reflect"
 	"testing"
@@ -12,19 +13,21 @@ import (
 	olmv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	mcev1 "github.com/stolostron/backplane-operator/api/v1"
 	operatorsv1 "github.com/stolostron/multiclusterhub-operator/api/v1"
+	utils "github.com/stolostron/multiclusterhub-operator/pkg/utils"
 	"github.com/stolostron/multiclusterhub-operator/pkg/version"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 )
 
+var replicas int32 = 1
+
 func Test_allComponentsSuccessful(t *testing.T) {
-	available := operatorsv1.StatusCondition{Type: "Available", Status: v1.ConditionTrue, Available: true}
-	deployed := operatorsv1.StatusCondition{Type: "Available", Status: v1.ConditionTrue, Available: true}
-	unavailable := operatorsv1.StatusCondition{Type: "Available", Status: v1.ConditionFalse}
+	available := operatorsv1.StatusCondition{Type: "Available", Status: metav1.ConditionTrue, Available: true}
+	deployed := operatorsv1.StatusCondition{Type: "Available", Status: metav1.ConditionTrue, Available: true}
+	unavailable := operatorsv1.StatusCondition{Type: "Available", Status: metav1.ConditionFalse}
 	type args struct {
 		components map[string]operatorsv1.StatusCondition
 	}
@@ -90,11 +93,11 @@ func Test_latestDeployCondition(t *testing.T) {
 
 	first := appsv1.DeploymentCondition{
 		Type:               appsv1.DeploymentProgressing,
-		LastTransitionTime: v1.NewTime(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)),
+		LastTransitionTime: metav1.NewTime(time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)),
 	}
 	second := appsv1.DeploymentCondition{
 		Type:               appsv1.DeploymentAvailable,
-		LastTransitionTime: v1.NewTime(time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)),
+		LastTransitionTime: metav1.NewTime(time.Date(3000, 1, 1, 0, 0, 0, 0, time.UTC)),
 	}
 	type args struct {
 		conditions []appsv1.DeploymentCondition
@@ -135,26 +138,26 @@ var (
 	old = operatorsv1.HubCondition{
 		Type:               operatorsv1.Progressing,
 		Reason:             "Working",
-		Status:             v1.ConditionTrue,
-		LastTransitionTime: v1.NewTime(time.Date(2020, 5, 29, 0, 0, 0, 0, time.UTC)),
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(time.Date(2020, 5, 29, 0, 0, 0, 0, time.UTC)),
 	}
 	old2 = operatorsv1.HubCondition{
 		Type:               operatorsv1.Complete,
 		Reason:             "EverythingRunning",
-		Status:             v1.ConditionTrue,
-		LastTransitionTime: v1.NewTime(time.Date(2020, 5, 29, 0, 0, 0, 0, time.UTC)),
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(time.Date(2020, 5, 29, 0, 0, 0, 0, time.UTC)),
 	}
 	new = operatorsv1.HubCondition{
 		Type:               operatorsv1.Progressing,
 		Reason:             "NotWorking",
-		Status:             v1.ConditionFalse,
-		LastTransitionTime: v1.NewTime(time.Date(2020, 5, 29, 0, 1, 0, 0, time.UTC)),
+		Status:             metav1.ConditionFalse,
+		LastTransitionTime: metav1.NewTime(time.Date(2020, 5, 29, 0, 1, 0, 0, time.UTC)),
 	}
 	new2 = operatorsv1.HubCondition{
 		Type:               operatorsv1.Complete,
 		Reason:             "EverythingRunning",
-		Status:             v1.ConditionTrue,
-		LastTransitionTime: v1.NewTime(time.Date(2020, 5, 29, 0, 1, 0, 0, time.UTC)),
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(time.Date(2020, 5, 29, 0, 1, 0, 0, time.UTC)),
 	}
 )
 
@@ -225,6 +228,146 @@ func TestGetHubCondition(t *testing.T) {
 	}
 }
 
+func TestFilterHubConditions(t *testing.T) {
+	testStatusExact := operatorsv1.MultiClusterHubStatus{
+		HubConditions: []operatorsv1.HubCondition{
+			{
+				Type: operatorsv1.Complete,
+			},
+		},
+	}
+
+	testStatusSubstring := operatorsv1.MultiClusterHubStatus{
+		HubConditions: []operatorsv1.HubCondition{
+			{
+				Type: operatorsv1.ComponentFailure + operatorsv1.HubConditionType(": ") + operatorsv1.HubConditionType("test-component"),
+			},
+		},
+	}
+
+	exactTests := []struct {
+		name     string
+		condType operatorsv1.HubConditionType
+		want     bool
+	}{
+		{
+			name:     "exact type filtered",
+			condType: operatorsv1.Complete,
+			want:     true,
+		},
+		{
+			name:     "exact type not filtered",
+			condType: operatorsv1.Blocked,
+			want:     false,
+		},
+	}
+
+	substringTests := []struct {
+		name      string
+		substring string
+		want      bool
+	}{
+		{
+			name:      "substring filtered",
+			substring: string(operatorsv1.ComponentFailure),
+			want:      true,
+		},
+		{
+			name:      "substring filtered",
+			substring: string(operatorsv1.Complete),
+			want:      false,
+		},
+	}
+
+	for _, tt := range exactTests {
+		t.Run(tt.name, func(t *testing.T) {
+			conditions := filterOutCondition(testStatusExact.HubConditions, tt.condType)
+			empty := len(conditions) == 0
+			if empty != tt.want {
+				t.Errorf("%s: expected condition to get filtered out: %t, got: %t", tt.name, tt.want, empty)
+			}
+		})
+	}
+
+	for _, tt := range substringTests {
+		t.Run(tt.name, func(t *testing.T) {
+			conditions := filterOutConditionWithSubstring(testStatusSubstring.HubConditions, tt.substring)
+			empty := len(conditions) == 0
+			if empty != tt.want {
+				t.Errorf("%s: expected condition to get filtered out: %t, got: %t", tt.name, tt.want, empty)
+			}
+		})
+	}
+}
+func TestHubConditionPresent(t *testing.T) {
+	testStatusExact := operatorsv1.MultiClusterHubStatus{
+		HubConditions: []operatorsv1.HubCondition{
+			{
+				Type: operatorsv1.Complete,
+			},
+		},
+	}
+
+	testStatusSubstring := operatorsv1.MultiClusterHubStatus{
+		HubConditions: []operatorsv1.HubCondition{
+			{
+				Type: operatorsv1.ComponentFailure + operatorsv1.HubConditionType(": ") + operatorsv1.HubConditionType("test-component"),
+			},
+		},
+	}
+
+	exactTests := []struct {
+		name     string
+		condType operatorsv1.HubConditionType
+		want     bool
+	}{
+		{
+			name:     "exact type present",
+			condType: operatorsv1.Complete,
+			want:     true,
+		},
+		{
+			name:     "exact type not present",
+			condType: operatorsv1.Blocked,
+			want:     false,
+		},
+	}
+
+	substringTests := []struct {
+		name      string
+		substring string
+		want      bool
+	}{
+		{
+			name:      "substring present",
+			substring: "test-component",
+			want:      true,
+		},
+		{
+			name:      "substring not present",
+			substring: "failure-component",
+			want:      false,
+		},
+	}
+	for _, tt := range exactTests {
+		t.Run(tt.name, func(t *testing.T) {
+			exists := HubConditionPresent(testStatusExact, tt.condType)
+			if exists != tt.want {
+				t.Errorf("%s: expected condition to exist: %t, got: %t", tt.name, tt.want, exists)
+			}
+		})
+	}
+
+	for _, tt := range substringTests {
+		t.Run(tt.name, func(t *testing.T) {
+			exists := HubConditionPresentWithSubstring(testStatusSubstring, tt.substring)
+			if exists != tt.want {
+				t.Errorf("%s: expected condition to exist: %t, got: %t", tt.name, tt.want, exists)
+			}
+		})
+	}
+}
+
 func TestRemoveHubCondition(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -267,8 +410,8 @@ func TestRemoveHubCondition(t *testing.T) {
 }
 
 func Test_aggregatePhase(t *testing.T) {
-	available := operatorsv1.StatusCondition{Type: "Available", Status: v1.ConditionTrue, Available: true}
-	unavailable := operatorsv1.StatusCondition{Type: "Available", Status: v1.ConditionFalse}
+	available := operatorsv1.StatusCondition{Type: "Available", Status: metav1.ConditionTrue, Available: true}
+	unavailable := operatorsv1.StatusCondition{Type: "Available", Status: metav1.ConditionFalse}
 
 	tests := []struct {
 		name   string
@@ -335,6 +478,24 @@ func Test_aggregatePhase(t *testing.T) {
 			},
 			want: operatorsv1.HubRunning,
 		},
+		{
+			name: "Running hub with paused",
+			status: operatorsv1.MultiClusterHubStatus{
+				CurrentVersion: "",
+				Components: map[string]operatorsv1.StatusCondition{
+					"foo": available,
+				},
+				HubConditions: []operatorsv1.HubCondition{
+					{
+						Message: "Multiclusterhub is paused",
+						Reason:  PausedReason,
+						Status:  metav1.ConditionUnknown,
+						Type:    operatorsv1.Progressing,
+					},
+				},
+			},
+			want: operatorsv1.HubPaused,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -354,6 +515,9 @@ func Test_mapCSV(t *testing.T) {
 		{
 			name: "Successful install",
 			csv: &olmv1alpha1.ClusterServiceVersion{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "advanced-cluster-management.v2.11.0",
+				},
 				Status: olmv1alpha1.ClusterServiceVersionStatus{
 					Conditions: []olmv1alpha1.ClusterServiceVersionCondition{
 						{
@@ -365,6 +529,7 @@ func Test_mapCSV(t *testing.T) {
 				},
 			},
 			want: operatorsv1.StatusCondition{
+				Name:      "advanced-cluster-management.v2.11.0",
 				Kind:      "ClusterServiceVersion",
 				Status:    metav1.ConditionTrue,
 				Reason:    "InstallSucceeded",
@@ -378,7 +543,7 @@ func Test_mapCSV(t *testing.T) {
 			csv: &olmv1alpha1.ClusterServiceVersion{
 				Status: olmv1alpha1.ClusterServiceVersionStatus{},
 			},
-			want: unknownStatus,
+			want: unknownStatus("advanced-cluster-management.v2.11.0", "ClusterServiceVersion"),
 		},
 	}
 	for _, tt := range tests {
@@ -418,6 +583,9 @@ func Test_mapMCE(t *testing.T) {
 		{
 			name: "Successful install",
 			mce: &mcev1.MultiClusterEngine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "multicluster-engine.v2.6.0",
+				},
 				Status: mcev1.MultiClusterEngineStatus{
 					Conditions: []mcev1.MultiClusterEngineCondition{
 						{
@@ -430,7 +598,8 @@ func Test_mapMCE(t *testing.T) {
 				},
 			},
 			want: operatorsv1.StatusCondition{
-				Kind:      "ClusterServiceVersion",
+				Name:      "multicluster-engine.v2.6.0",
+				Kind:      "MultiClusterEngine",
 				Status:    metav1.ConditionTrue,
 				Reason:    "Available",
 				Message:   "",
@@ -445,7 +614,7 @@ func Test_mapMCE(t *testing.T) {
 					Conditions: []mcev1.MultiClusterEngineCondition{},
 				},
 			},
-			want: unknownStatus,
+			want: unknownStatus("multicluster-engine.v2.6.0", "MultiClusterEngine"),
 		},
 	}
 	for _, tt := range tests {
@@ -511,7 +680,7 @@ func Test_mapSubscription(t *testing.T) {
 			sub: &olmv1alpha1.Subscription{
 				Status: olmv1alpha1.SubscriptionStatus{},
 			},
-			want: unknownStatus,
+			want: unknownStatus("test", "Subscription"),
 		},
 	}
 	for _, tt := range tests {
@@ -588,7 +757,7 @@ func Test_getComponentStatuses(t *testing.T) {
 				},
 				allDeps: []*appsv1.Deployment{
 					{
-						ObjectMeta: v1.ObjectMeta{
+						ObjectMeta: metav1.ObjectMeta{
 							Annotations: map[string]string{
 								"meta.helm.sh/release-name": "console-hr",
 							},
@@ -609,14 +778,153 @@ func Test_getComponentStatuses(t *testing.T) {
 				},
 			},
 			want: map[string]operatorsv1.StatusCondition{
-				"local-cluster": unknownStatus,
+				"local-cluster": unknownStatus("local-cluster", "Component"),
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := getComponentStatuses(tt.args.hub, tt.args.allDeps, tt.args.allCRs, true); len(got) == 0 {
+			if got := getComponentStatuses(tt.args.hub, tt.args.allDeps, tt.args.allCRs, true, false); len(got) == 0 {
 				t.Errorf("getComponentStatuses() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func Test_ComponentsAreRunning(t *testing.T) {
+	tests := []struct {
+		name   string
+		csv    olmv1alpha1.ClusterServiceVersion
+		deploy appsv1.Deployment
+		mce    mcev1.MultiClusterEngine
+		mch    operatorsv1.MultiClusterHub
+		ns     corev1.Namespace
+		ns2    corev1.Namespace
+		sub    olmv1alpha1.Subscription
+		want   bool
+	}{
+		{
+			name: "should ensure that components are not running",
+			csv: olmv1alpha1.ClusterServiceVersion{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "multicluster-engine.v2.6.0",
+					Namespace: "multicluster-engine",
+				},
+			},
+			deploy: appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "search-v2-operator",
+					Namespace: "ocm",
+				},
+				Spec: appsv1.DeploymentSpec{
+					Replicas: &replicas,
+					Template: corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "search-v2-operator",
+							Namespace: "ocm",
+						},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{
+									Name:  "agent",
+									Image: "quay.io/stolostron/search-v2-operator:latest",
+								},
+							},
+						},
+					},
+				},
+			},
+			mce: mcev1.MultiClusterEngine{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "multiclusterengine",
+					Labels: map[string]string{
+						utils.MCEManagedByLabel: "true",
+					},
+				},
+				Spec: mcev1.MultiClusterEngineSpec{
+					TargetNamespace: "multicluster-engine",
+				},
+			},
+			mch: operatorsv1.MultiClusterHub{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "multiclusterhub",
+					Namespace: "ocm",
+				},
+			},
+			ns: corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "ocm",
+				},
+			},
+			ns2: corev1.Namespace{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "multicluster-engine",
+				},
+			},
+			sub: olmv1alpha1.Subscription{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "multicluster-engine",
+					Namespace: "multicluster-engine",
+					Labels: map[string]string{
+						utils.MCEManagedByLabel: "true",
+					},
+				},
+				Spec: &olmv1alpha1.SubscriptionSpec{
+					Channel:                "stable-2.6",
+					InstallPlanApproval:    "Automatic",
+					CatalogSource:          "multiclusterengine-catalog",
+					CatalogSourceNamespace: "openshift-marketplace",
+					Package:                "multicluster-engine",
+				},
+				Status: olmv1alpha1.SubscriptionStatus{
+					CurrentCSV: "multicluster-engine.v2.6.0",
+				},
+			},
+			want: false,
+		},
+	}
+
+	registerScheme()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			defer func() {
+				if err := recon.Client.Delete(context.TODO(), &tt.ns); err != nil {
+					t.Errorf("failed to delete namespace: %v", err)
+				}
+				if err := recon.Client.Delete(context.TODO(), &tt.ns2); err != nil {
+					t.Errorf("failed to delete namespace: %v", err)
+				}
+				if err := recon.Client.Delete(context.TODO(), &tt.mce); err != nil {
+					t.Errorf("failed to delete multiclusterengine: %v", err)
+				}
+			}()
+
+			if err := recon.Client.Create(context.TODO(), &tt.ns); err != nil {
+				t.Errorf("failed to create namespace: %v", err)
+			}
+
+			if err := recon.Client.Create(context.TODO(), &tt.ns2); err != nil {
+				t.Errorf("failed to create namespace: %v", err)
+			}
+
+			if err := recon.Client.Create(context.TODO(), &tt.sub); err != nil {
+				t.Errorf("failed to create subscription: %v", err)
+			}
+
+			if err := recon.Client.Create(context.TODO(), &tt.csv); err != nil {
+				t.Errorf("failed to create clusterserviceversion: %v", err)
+			}
+
+			if err := recon.Client.Create(context.TODO(), &tt.mce); err != nil {
+				t.Errorf("failed to create multiclusterengine: %v", err)
+			}
+
+			if err := recon.Client.Create(context.TODO(), &tt.deploy); err != nil {
+				t.Errorf("failed to create deployment: %v", err)
+			}
+
+			if ok := recon.ComponentsAreRunning(&tt.mch, true, false); ok != tt.want {
+				t.Errorf("failed to ensure that components are running: %v", ok)
 			}
 		})
 	}
