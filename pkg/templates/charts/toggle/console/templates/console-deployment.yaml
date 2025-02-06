@@ -105,8 +105,25 @@ spec:
         imagePullPolicy: {{ .Values.global.pullPolicy }}
         resources:
           requests:
+          {{- if hasKey .Values.global.templateOverrides "console_deployment_container_memory_request" }}
+            memory: {{ .Values.global.templateOverrides.console_deployment_container_memory_request | quote }}
+          {{- else }}
             memory: "40Mi"
+          {{- end }}
+          {{- if hasKey .Values.global.templateOverrides "console_deployment_container_cpu_request" }}
+            cpu: {{ .Values.global.templateOverrides.console_deployment_container_cpu_request | quote }}
+          {{- else }}
             cpu: "3m"
+          {{- end }}
+        {{- if or (hasKey .Values.global.templateOverrides "console_deployment_container_memory_limit") (hasKey .Values.global.templateOverrides "console_deployment_container_cpu_limit") }}
+          limits:
+          {{- if hasKey .Values.global.templateOverrides "console_deployment_container_memory_limit" }}
+            memory: {{ .Values.global.templateOverrides.console_deployment_container_memory_limit | quote }}
+          {{- end }}
+          {{- if hasKey .Values.global.templateOverrides "console_deployment_container_cpu_limit" }}
+            cpu: {{ .Values.global.templateOverrides.console_deployment_container_cpu_limit | quote }}
+          {{- end }}
+        {{- end }}
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
@@ -117,12 +134,10 @@ spec:
         env:
         - name: PORT
           value: "3000"
-        - name: FRONTEND_URL
-          value: "https://multicloud-console.{{ .Values.hubconfig.ocpIngress }}/multicloud"
-        - name: BACKEND_URL
-          value: "https://multicloud-console.{{ .Values.hubconfig.ocpIngress }}/multicloud"
         - name: CLUSTER_API_URL
           value: https://kubernetes.default.svc:443
+        - name: DISABLE_EVENTS
+          value: "true"
         {{- if .Values.hubconfig.proxyConfigs }}
         - name: HTTP_PROXY
           value: {{ .Values.hubconfig.proxyConfigs.HTTP_PROXY }}
@@ -139,13 +154,13 @@ spec:
             path: /readinessProbe
             port: 3000
             scheme: HTTPS
-          failureThreshold: 1
+          timeoutSeconds: 5
         livenessProbe:
           httpGet:
             path: /livenessProbe
             port: 3000
             scheme: HTTPS
-          failureThreshold: 1
+          timeoutSeconds: 5
           initialDelaySeconds: 10
       {{- if .Values.global.pullSecret }}
       imagePullSecrets:

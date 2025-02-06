@@ -45,7 +45,7 @@ IMG ?= $(REGISTRY)/multiclusterhub-operator:$(VERSION)
 # Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
 CRD_OPTIONS ?= "crd:crdVersions=v1"
 # ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.20
+ENVTEST_K8S_VERSION = 1.30
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -97,7 +97,7 @@ test-prep: manifests generate fmt vet envtest ## prepare to run tests.
 
 test: manifests generate fmt vet envtest ## Run tests.
 	OPERATOR_VERSION=9.9.9 KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" \
-	  go test $(shell go list ./... | grep -E -v "test") -coverprofile cover.out
+	  ENV_TEST="true" go test $(shell go list ./... | grep -E -v "test") -coverprofile cover.out
 
 ##@ Build
 
@@ -112,6 +112,12 @@ docker-build: ## test ## Build docker image with the manager.
 
 docker-push: ## Push docker image with the manager.
 	docker push ${IMG}
+
+podman-build: ## test ## Build podman image with the manager.
+	podman build --no-cache -t ${IMG} .
+
+podman-push: ## Push podman image with the manager.
+	podman push ${IMG}
 
 ##@ Deployment
 
@@ -142,7 +148,7 @@ ENVTEST ?= $(LOCALBIN)/setup-envtest
 
 ## Tool Versions
 KUSTOMIZE_VERSION ?= v3.8.7
-CONTROLLER_TOOLS_VERSION ?= v0.9.2
+CONTROLLER_TOOLS_VERSION ?= v0.15.0
 
 KUSTOMIZE_INSTALL_SCRIPT ?= "https://raw.githubusercontent.com/kubernetes-sigs/kustomize/master/hack/install_kustomize.sh"
 .PHONY: kustomize
@@ -158,7 +164,7 @@ $(CONTROLLER_GEN): $(LOCALBIN)
 .PHONY: envtest
 envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
 $(ENVTEST): $(LOCALBIN)
-	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@release-0.17
 
 .PHONY: bundle
 bundle: manifests kustomize ## Generate bundle manifests and metadata, then validate generated files.
@@ -174,6 +180,14 @@ bundle-build: ## Build the bundle image.
 .PHONY: bundle-push
 bundle-push: ## Push the bundle image.
 	$(MAKE) docker-push IMG=$(BUNDLE_IMG)
+
+.PHONY: podman-bundle-build
+podman-bundle-build: ## Build the bundle image.
+	podman build -f bundle.Dockerfile -t $(BUNDLE_IMG) .
+
+.PHONY: podman-bundle-push
+podman-bundle-push: ## Push the bundle image.
+	$(MAKE) podman-push IMG=$(BUNDLE_IMG)
 
 .PHONY: opm
 OPM = ./bin/opm
@@ -216,7 +230,11 @@ catalog-build: opm ## Build a catalog image.
 catalog-push: ## Push a catalog image.
 	$(MAKE) docker-push IMG=$(CATALOG_IMG)
 
+# Push the catalog image.
+.PHONY: podman-catalog-push
+podman-catalog-push: ## Push a catalog image.
+	$(MAKE) podman-push IMG=$(CATALOG_IMG)
+
 
 -include Makefile.dev
 -include test/function_tests/Makefile
--include test/mock-component-image/Makefile

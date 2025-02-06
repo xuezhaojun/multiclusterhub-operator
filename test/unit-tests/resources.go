@@ -6,10 +6,15 @@ package resources
 import (
 	operatorsv1 "github.com/stolostron/multiclusterhub-operator/api/v1"
 
+	configv1 "github.com/openshift/api/config/v1"
+	promv1 "github.com/prometheus-operator/prometheus-operator/pkg/apis/monitoring/v1"
 	mcev1 "github.com/stolostron/backplane-operator/api/v1"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ocmapi "open-cluster-management.io/api/addon/v1alpha1"
+
+	subv1alpha1 "github.com/operator-framework/api/pkg/operators/v1alpha1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
@@ -25,6 +30,18 @@ var (
 	MCHLookupKey = types.NamespacedName{Name: MulticlusterhubName, Namespace: MulticlusterhubNamespace}
 	MCELookupKey = types.NamespacedName{Name: MultiClusterEngineName}
 )
+
+func MCECatalogSource() *subv1alpha1.CatalogSource {
+	return &subv1alpha1.CatalogSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "multiclusterengine-catalog",
+			Namespace: "openshift-marketplace",
+		},
+		Spec: subv1alpha1.CatalogSourceSpec{
+			Priority: 0,
+		},
+	}
+}
 
 func EmptyMCE() mcev1.MultiClusterEngine {
 	return mcev1.MultiClusterEngine{
@@ -88,7 +105,7 @@ func EmptyMCH() operatorsv1.MultiClusterHub {
 	}
 }
 
-func NoSearchMCH() operatorsv1.MultiClusterHub {
+func NoComponentMCH() operatorsv1.MultiClusterHub {
 	return operatorsv1.MultiClusterHub{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      MulticlusterhubName,
@@ -98,11 +115,35 @@ func NoSearchMCH() operatorsv1.MultiClusterHub {
 			Overrides: &operatorsv1.Overrides{
 				Components: []operatorsv1.ComponentConfig{
 					{
+						Name:    operatorsv1.Console,
+						Enabled: false,
+					},
+					{
+						Name:    operatorsv1.Insights,
+						Enabled: false,
+					},
+					{
 						Name:    operatorsv1.Search,
 						Enabled: false,
 					},
 					{
 						Name:    operatorsv1.ClusterBackup,
+						Enabled: false,
+					},
+					{
+						Name:    operatorsv1.GRC,
+						Enabled: false,
+					},
+					{
+						Name:    operatorsv1.ClusterLifecycle,
+						Enabled: false,
+					},
+					{
+						Name:    operatorsv1.MultiClusterObservability,
+						Enabled: false,
+					},
+					{
+						Name:    operatorsv1.Volsync,
 						Enabled: false,
 					},
 				},
@@ -134,6 +175,17 @@ func InsightsMCH() operatorsv1.MultiClusterHub {
 	}
 }
 
+func OCPIngress() *configv1.Ingress {
+	return &configv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "cluster",
+		},
+		Spec: configv1.IngressSpec{
+			Domain: "dev01.red-chesterfield.com",
+		},
+	}
+}
+
 func OCMNamespace() *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
@@ -142,10 +194,19 @@ func OCMNamespace() *corev1.Namespace {
 	}
 }
 
+func MarketNamespace() *corev1.Namespace {
+	return &corev1.Namespace{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "openshift-marketplace",
+		},
+	}
+}
+
 func MCENamespace() *corev1.Namespace {
 	return &corev1.Namespace{
 		ObjectMeta: metav1.ObjectMeta{
-			Name: "multicluster-engine",
+			Name:   "multicluster-engine",
+			Labels: map[string]string{},
 		},
 	}
 }
@@ -177,4 +238,42 @@ func SampleService(m *operatorsv1.MultiClusterHub) *corev1.Service {
 	}
 
 	return s
+}
+
+func SampleClusterManagementAddOn(component string) *ocmapi.ClusterManagementAddOn {
+	addonName, err := operatorsv1.GetClusterManagementAddonName(component)
+	if err != nil {
+		addonName = "unknown"
+	}
+
+	addon := &ocmapi.ClusterManagementAddOn{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: addonName,
+		},
+		Spec: ocmapi.ClusterManagementAddOnSpec{
+			AddOnMeta: ocmapi.AddOnMeta{
+				Description: "Sample addon description",
+				DisplayName: component,
+			},
+		},
+	}
+
+	return addon
+}
+
+func SampleServiceMonitor(component string, namespace string) *promv1.ServiceMonitor {
+	smName, err := operatorsv1.GetLegacyServiceMonitorName(component)
+	if err != nil {
+		smName = "unknown"
+	}
+
+	sm := &promv1.ServiceMonitor{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      smName,
+			Namespace: namespace,
+		},
+		Spec: promv1.ServiceMonitorSpec{},
+	}
+
+	return sm
 }

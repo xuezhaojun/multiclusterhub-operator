@@ -1,13 +1,10 @@
 package v1_test
 
 import (
-	// "os"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
 	api "github.com/stolostron/multiclusterhub-operator/api/v1"
-	// "github.com/stolostron/multiclusterhub-operator/pkg/utils"
 )
 
 func config(name string, enabled bool) api.ComponentConfig {
@@ -27,9 +24,8 @@ func makeMCH(configs ...api.ComponentConfig) *api.MultiClusterHub {
 	mch.Spec.Overrides = &api.Overrides{
 		Components: make([]api.ComponentConfig, len(configs)),
 	}
-	for i := range configs {
-		mch.Spec.Overrides.Components[i] = configs[i]
-	}
+
+	copy(mch.Spec.Overrides.Components, configs)
 	return mch
 }
 
@@ -134,14 +130,14 @@ var _ = Describe("V1 API Methods", func() {
 	})
 
 	It("correctly validates a component name", func() {
-		Expect(api.ValidComponent(config(api.Search, true))).To(BeTrue())
-		Expect(api.ValidComponent(config("invalid", true))).To(BeFalse())
+		Expect(api.ValidComponent(config(api.Search, true), api.MCHComponents)).To(BeTrue())
+		Expect(api.ValidComponent(config("invalid", true), api.MCHComponents)).To(BeFalse())
 	})
 
-	It("gets the correct number of  default enabled components", func() {
+	It("gets the correct number of default enabled components", func() {
 		components, err := api.GetDefaultEnabledComponents()
 
-		Expect(len(components)).To(Equal(8))
+		Expect(len(components)).To(Equal(11))
 		Expect(err).To(BeNil())
 	})
 })

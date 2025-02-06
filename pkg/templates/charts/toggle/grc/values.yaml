@@ -5,16 +5,17 @@ global:
     governance_policy_propagator: ""
     governance_policy_addon_controller: ""
     cert_policy_controller: ""
-    iam_policy_controller: ""
     config_policy_controller: ""
     governance_policy_framework_addon: ""
-    kube_rbac_proxy: ""
+  templateOverrides: {}
   namespace: default
   pullSecret: null
   pullPolicy: Always
+  hubSize: Small
 hubconfig:
   nodeSelector: null
   proxyConfigs: {}
   replicaCount: 1
   tolerations: []
+  ocpVersion: 4.12.0
 org: open-cluster-management
